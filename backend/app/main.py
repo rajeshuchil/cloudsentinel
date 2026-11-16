@@ -3,6 +3,8 @@ from typing import Dict, List
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.api.system import router as system_router
+
 # Initialize FastAPI application
 app = FastAPI(
     title="CloudSentinel API",
@@ -21,6 +23,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Include API routers
+app.include_router(system_router)
 
 
 @app.get("/api/health", summary="Health Check")
