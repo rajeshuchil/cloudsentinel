@@ -326,3 +326,45 @@ def resolve_alert(alert_id: str, db_path: Optional[str] = None) -> Optional[Dict
             conn.execute(query, (now, now, alert_id))
 
     return get_alert_by_id(alert_id, db_path=db_path)
+
+
+def get_open_alert_by_source(source: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve any currently open (active or acknowledged) alert for a specific source.
+    """
+    query = """
+        SELECT id, title, description, severity, source,
+               status, created_at, updated_at, acknowledged_at, resolved_at
+        FROM alerts
+        WHERE source = ? AND status IN ('active', 'acknowledged')
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(query, (source,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_alert_metrics(
+    alert_id: str,
+    severity: str,
+    description: str,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Update the severity and description of an existing open alert while preserving its current status
+    (e.g., acknowledged remains acknowledged).
+    """
+    now = _utc_now_iso()
+    query = """
+        UPDATE alerts
+        SET severity = ?,
+            description = ?,
+            updated_at = ?
+        WHERE id = ?
+    """
+    with get_db_connection(db_path) as conn:
+        with conn:
+            conn.execute(query, (severity, description, now, alert_id))
+
+    return get_alert_by_id(alert_id, db_path=db_path)

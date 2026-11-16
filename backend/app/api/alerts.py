@@ -9,8 +9,23 @@ from backend.app.database.repositories import (
     get_alerts as repo_get_alerts,
     resolve_alert as repo_resolve,
 )
+from backend.app.services.alert_engine import evaluate_all_alerts
 
 router = APIRouter(prefix="/api/alerts", tags=["Alerts"])
+
+
+@router.post("/evaluate", summary="Evaluate Alert Conditions", response_model=Dict[str, Any])
+def run_alert_evaluation() -> Dict[str, Any]:
+    """
+    Trigger an alert evaluation cycle:
+    1. Collect current Linux host metrics.
+    2. Evaluate CPU, memory, and disk usage against warning and critical thresholds.
+    3. Ingest and analyze new authentication events for repeated failure bursts.
+    4. Create new alerts or escalate severity without duplicate active alerts.
+    5. Automatically resolve recovered metric alerts.
+    6. Return a summary of created, updated, and resolved alerts.
+    """
+    return evaluate_all_alerts()
 
 
 class AlertCreate(BaseModel):

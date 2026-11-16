@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
+from backend.app.config import get_monitored_disk_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,25 +84,26 @@ def collect_memory_metrics() -> Dict[str, Any]:
         }
 
 
-def collect_disk_metrics(path: str = "/") -> Dict[str, Any]:
+def collect_disk_metrics(path: Optional[str] = None) -> Dict[str, Any]:
     """
-    Collect disk space usage for the root filesystem.
+    Collect disk space usage for the monitored filesystem.
     """
+    target_path = path if path is not None else get_monitored_disk_path()
     try:
-        usage = psutil.disk_usage(path)
+        usage = psutil.disk_usage(target_path)
         return {
-            "mount_point": path,
+            "mount_point": target_path,
             "total_bytes": usage.total,
             "used_bytes": usage.used,
             "free_bytes": usage.free,
             "usage_percent": usage.percent,
         }
     except Exception as e:
-        logger.error("Error collecting disk metrics for path '%s': %s", path, e)
+        logger.error("Error collecting disk metrics for path '%s': %s", target_path, e)
         return {
-            "error": f"Failed to collect disk metrics for {path}",
+            "error": f"Failed to collect disk metrics for {target_path}",
             "detail": str(e),
-            "mount_point": path,
+            "mount_point": target_path,
             "total_bytes": None,
             "used_bytes": None,
             "free_bytes": None,
@@ -205,6 +208,6 @@ def get_all_system_metrics() -> Dict[str, Any]:
         "system": collect_system_info(),
         "cpu": collect_cpu_metrics(),
         "memory": collect_memory_metrics(),
-        "disk": collect_disk_metrics("/"),
+        "disk": collect_disk_metrics(),
         "network": collect_network_metrics(),
     }
