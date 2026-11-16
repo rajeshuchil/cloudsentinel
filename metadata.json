@@ -1,0 +1,8 @@
+{
+  "name": "CloudSentinel",
+  "description": "Infrastructure monitoring dashboard for CPU, RAM, disk usage, system health status, and operational alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
