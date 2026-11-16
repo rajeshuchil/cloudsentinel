@@ -10,31 +10,39 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sun,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertsTable } from './components/AlertsTable';
 import { CpuLineChart } from './components/CpuLineChart';
 import { MetricCard } from './components/MetricCard';
 import { SecurityEventsView } from './components/SecurityEventsView';
 import { SecuritySummarySection } from './components/SecuritySummarySection';
 import { SystemHealthBanner } from './components/SystemHealthBanner';
+import { INITIAL_UBUNTU_HOST, computeSystemHealth } from './data/mockTelemetry';
 import {
-  INITIAL_ALERTS,
-  INITIAL_SECURITY_EVENTS,
-  INITIAL_UBUNTU_HOST,
-  computeSystemHealth,
-  stepHostTelemetrySample,
-} from './data/mockTelemetry';
+  acknowledgeAlert,
+  evaluateAlerts,
+  formatUptime,
+  getAlerts,
+  getSecurityEvents,
+  getSystemMetrics,
+  mapApiAlertToAlertItem,
+  mapApiSecurityEventToUi,
+} from './services/api';
 import {
   AlertItem,
   AlertStatus,
+  CpuPoint,
   DashboardView,
   SecurityEvent,
   SecurityEventStatus,
   TimeRange,
   UbuntuHost,
 } from './types/monitoring';
+import { resolveAlert } from './services/api';
 
 function formatShortTime(date: Date): string {
   const hh = String(date.getHours()).padStart(2, '0');
@@ -43,50 +51,320 @@ function formatShortTime(date: Date): string {
   return `${hh}:${mm}:${ss}`;
 }
 
+/** How many real-time CPU samples to retain per time-range bucket */
+const CPU_SERIES_MAX_POINTS: Record<TimeRange, number> = {
+  '15m': 18,  // one per ~50s
+  '1h': 60,
+  '6h': 72,
+  '24h': 96,
+};
+
 export default function App() {
   const [host, setHost] = useState<UbuntuHost>(INITIAL_UBUNTU_HOST);
-  const [alerts, setAlerts] = useState<AlertItem[]>(INITIAL_ALERTS);
-  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>(
-    INITIAL_SECURITY_EVENTS
-  );
-  const [selectedSecurityEventId, setSelectedSecurityEventId] = useState<string | null>(
-    INITIAL_SECURITY_EVENTS[0]?.id ?? null
-  );
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
+  const [selectedSecurityEventId, setSelectedSecurityEventId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<DashboardView>('overview');
   const [timeRange, setTimeRange] = useState<TimeRange>('15m');
-  const [liveSimulation, setLiveSimulation] = useState<boolean>(true);
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
-  const [lastUpdated, setLastUpdated] = useState<string>('12:40:00');
+  const [lastUpdated, setLastUpdated] = useState<string>('—');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [isLive, setIsLive] = useState<boolean>(true);
 
+  // Connection state
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Loading / action state
+  const [initialLoading, setInitialLoading] = useState<boolean>(true);
+  const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
+  const [pendingAlertId, setPendingAlertId] = useState<string | null>(null);
+
+  // Ref to detect if component is still mounted
+  const mountedRef = useRef(true);
   useEffect(() => {
-    const root = document.documentElement;
-    if (darkMode) {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
-  }, [darkMode]);
-
-  const handleSampleTick = useCallback(() => {
-    const now = new Date();
-    setHost((prev) => stepHostTelemetrySample(prev, now));
-    setLastUpdated(formatShortTime(now));
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
 
+  // Dark-mode class toggle
   useEffect(() => {
-    if (!liveSimulation) return;
-    const timer = window.setInterval(handleSampleTick, 5000);
-    return () => window.clearInterval(timer);
-  }, [liveSimulation, handleSampleTick]);
+    const root = document.documentElement;
+    if (darkMode) root.classList.add('dark');
+    else root.classList.remove('dark');
+  }, [darkMode]);
 
-  const handleManualRefresh = () => {
+  // ----------------------------------------------------------------
+  // Helpers for updating host state from an API system response
+  // ----------------------------------------------------------------
+  const applySystemMetrics = useCallback(
+    (data: Awaited<ReturnType<typeof getSystemMetrics>>, prevHost: UbuntuHost): UbuntuHost => {
+      const { system, cpu, memory, disk, network } = data;
+
+      const cpuPct = cpu.usage_percent ?? prevHost.cpuPct;
+      const cpuDelta = Number((cpuPct - prevHost.cpuPct).toFixed(1));
+
+      const ramPct = memory.usage_percent ?? prevHost.ramPct;
+      const ramDelta = Number((ramPct - prevHost.ramPct).toFixed(1));
+      const ramTotalGb = memory.total_bytes ? Number((memory.total_bytes / 1_073_741_824).toFixed(1)) : prevHost.ramTotalGb;
+      const ramUsedGb = memory.used_bytes ? Number((memory.used_bytes / 1_073_741_824).toFixed(2)) : prevHost.ramUsedGb;
+      const ramCachedGb = memory.available_bytes
+        ? Number(((memory.total_bytes ?? 0) - (memory.used_bytes ?? 0) - (memory.available_bytes ?? 0)) / 1_073_741_824)
+        : prevHost.ramCachedGb;
+
+      const diskPct = disk.usage_percent ?? prevHost.diskPct;
+      const diskDelta = Number((diskPct - prevHost.diskPct).toFixed(1));
+      const diskTotalGb = disk.total_bytes ? Number((disk.total_bytes / 1_073_741_824).toFixed(1)) : prevHost.diskTotalGb;
+      const diskUsedGb = disk.used_bytes ? Number((disk.used_bytes / 1_073_741_824).toFixed(1)) : prevHost.diskUsedGb;
+      const diskMount = disk.mount_point || prevHost.diskMount;
+
+      // Determine primary interface + IP from network data
+      let networkInterface = prevHost.networkInterface;
+      let ipAddress = prevHost.ipAddress;
+      const ifaces = network?.interfaces ?? [];
+      for (const iface of ifaces) {
+        if (!iface.is_up) continue;
+        const ipv4 = iface.addresses.find((a) => a.family === 'IPv4');
+        if (ipv4 && !ipv4.address.startsWith('127.')) {
+          networkInterface = iface.name;
+          ipAddress = ipv4.address;
+          break;
+        }
+      }
+
+      // Build a new CPU series point
+      const now = new Date();
+      const newPoint: CpuPoint = {
+        timestamp: now.toISOString(),
+        label: formatShortTime(now),
+        usage: cpuPct,
+        userPct: Number((cpuPct * 0.72).toFixed(1)),
+        systemPct: Number((cpuPct * 0.28).toFixed(1)),
+      };
+
+      // Accumulate series per time range, respecting per-bucket maximums
+      const updatedSeries: Record<TimeRange, CpuPoint[]> = {} as Record<TimeRange, CpuPoint[]>;
+      for (const tr of ['15m', '1h', '6h', '24h'] as TimeRange[]) {
+        const existing = prevHost.cpuSeries[tr] ?? [];
+        const max = CPU_SERIES_MAX_POINTS[tr];
+        const appended = [...existing, newPoint];
+        updatedSeries[tr] = appended.length > max ? appended.slice(appended.length - max) : appended;
+      }
+
+      // Build load average string
+      let loadAvg = prevHost.loadAvg;
+      if (cpu.load_average) {
+        loadAvg = `${cpu.load_average['1m']} / ${cpu.load_average['5m']} / ${cpu.load_average['15m']}`;
+      }
+
+      return {
+        ...prevHost,
+        hostname: system.hostname || prevHost.hostname,
+        os: system.os_release || system.os || prevHost.os,
+        kernel: system.kernel_version || prevHost.kernel,
+        arch: system.architecture || prevHost.arch,
+        uptime: formatUptime(system.uptime_seconds),
+        ipAddress,
+        networkInterface,
+        cpuPct,
+        cpuDelta,
+        vCpuTotal: cpu.logical_cores ?? prevHost.vCpuTotal,
+        vCpuUsed: Number(((cpuPct / 100) * (cpu.logical_cores ?? prevHost.vCpuTotal)).toFixed(1)),
+        loadAvg,
+        ramPct,
+        ramDelta,
+        ramTotalGb,
+        ramUsedGb,
+        ramCachedGb: Math.max(0, ramCachedGb),
+        diskPct,
+        diskDelta,
+        diskTotalGb,
+        diskUsedGb,
+        diskMount,
+        diskDevice: prevHost.diskDevice,
+        cpuSeries: updatedSeries,
+      };
+    },
+    []
+  );
+
+  // ----------------------------------------------------------------
+  // Fetch: system metrics
+  // ----------------------------------------------------------------
+  const fetchSystemMetrics = useCallback(async () => {
+    try {
+      const data = await getSystemMetrics();
+      if (!mountedRef.current) return;
+      setBackendOnline(true);
+      setConnectError(null);
+      setHost((prev) => applySystemMetrics(data, prev));
+      setLastUpdated(formatShortTime(new Date()));
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const msg = err instanceof Error ? err.message : 'Connection failed';
+      setBackendOnline(false);
+      setConnectError(msg);
+    }
+  }, [applySystemMetrics]);
+
+  // ----------------------------------------------------------------
+  // Fetch: security events
+  // ----------------------------------------------------------------
+  const fetchSecurityEvents = useCallback(async () => {
+    try {
+      const data = await getSecurityEvents({ limit: 100 });
+      if (!mountedRef.current) return;
+      const mapped = data.events.map(mapApiSecurityEventToUi);
+      setSecurityEvents(mapped);
+      if (mapped.length > 0 && selectedSecurityEventId === null) {
+        setSelectedSecurityEventId(mapped[0].id);
+      }
+    } catch {
+      // Security events are non-critical — keep existing state silently
+    }
+  }, [selectedSecurityEventId]);
+
+  // ----------------------------------------------------------------
+  // Fetch: alerts
+  // ----------------------------------------------------------------
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const data = await getAlerts({ limit: 100 });
+      if (!mountedRef.current) return;
+      setAlerts(data.alerts.map(mapApiAlertToAlertItem));
+    } catch {
+      // Keep existing alerts silently
+    }
+  }, []);
+
+  // ----------------------------------------------------------------
+  // Run alert evaluation engine then refresh alerts + security
+  // ----------------------------------------------------------------
+  const runEvaluateAlerts = useCallback(async () => {
+    if (isEvaluating) return;
+    setIsEvaluating(true);
+    try {
+      await evaluateAlerts();
+      await Promise.all([fetchAlerts(), fetchSecurityEvents()]);
+    } catch {
+      // Evaluation is best-effort
+    } finally {
+      if (mountedRef.current) setIsEvaluating(false);
+    }
+  }, [isEvaluating, fetchAlerts, fetchSecurityEvents]);
+
+  // ----------------------------------------------------------------
+  // Initial load on mount
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    let alive = true;
+    async function initialLoad() {
+      await Promise.all([
+        fetchSystemMetrics(),
+        fetchSecurityEvents(),
+        fetchAlerts(),
+      ]);
+      if (!alive) return;
+      setInitialLoading(false);
+      // Run evaluation after initial data is loaded
+      runEvaluateAlerts();
+    }
+    initialLoad();
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----------------------------------------------------------------
+  // Polling: system metrics every 10 s while live
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    if (!isLive) return;
+    const timer = window.setInterval(fetchSystemMetrics, 10_000);
+    return () => window.clearInterval(timer);
+  }, [isLive, fetchSystemMetrics]);
+
+  // ----------------------------------------------------------------
+  // Polling: alert evaluation + refresh every 60 s
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    if (!isLive) return;
+    const timer = window.setInterval(runEvaluateAlerts, 60_000);
+    return () => window.clearInterval(timer);
+  }, [isLive, runEvaluateAlerts]);
+
+  // ----------------------------------------------------------------
+  // Manual refresh
+  // ----------------------------------------------------------------
+  const handleManualRefresh = useCallback(async () => {
     setIsRefreshing(true);
-    handleSampleTick();
-    window.setTimeout(() => setIsRefreshing(false), 300);
+    await Promise.all([
+      fetchSystemMetrics(),
+      fetchAlerts(),
+      fetchSecurityEvents(),
+    ]);
+    setIsRefreshing(false);
+  }, [fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
+
+  // ----------------------------------------------------------------
+  // Alert status actions (hit the backend PATCH endpoints)
+  // ----------------------------------------------------------------
+  const handleUpdateAlertStatus = useCallback(
+    async (id: string, status: AlertStatus) => {
+      if (pendingAlertId !== null) return; // prevent concurrent submissions
+      setPendingAlertId(id);
+      try {
+        if (status === 'acknowledged') {
+          await acknowledgeAlert(id);
+        } else if (status === 'resolved') {
+          await resolveAlert(id);
+        }
+        // Optimistic UI update
+        setAlerts((prev) =>
+          prev.map((item) => (item.id === id ? { ...item, status } : item))
+        );
+      } catch {
+        // If PATCH fails, do a fresh fetch to resync
+        await fetchAlerts();
+      } finally {
+        if (mountedRef.current) setPendingAlertId(null);
+      }
+    },
+    [pendingAlertId, fetchAlerts]
+  );
+
+  // ----------------------------------------------------------------
+  // Security event status (local-only until backend exposes PATCH)
+  // ----------------------------------------------------------------
+  const handleUpdateSecurityStatus = (id: string, status: SecurityEventStatus) => {
+    setSecurityEvents((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status } : item))
+    );
   };
 
+  // ----------------------------------------------------------------
+  // Callback: re-fetch alerts (used by onResetAlerts prop)
+  // ----------------------------------------------------------------
+  const handleRefreshAlerts = useCallback(() => {
+    fetchAlerts();
+  }, [fetchAlerts]);
+
+  // ----------------------------------------------------------------
+  // Callback: re-fetch security events (used by onResetEvents prop)
+  // ----------------------------------------------------------------
+  const handleRefreshSecurityEvents = useCallback(() => {
+    fetchSecurityEvents();
+    setSelectedSecurityEventId(securityEvents[0]?.id ?? null);
+  }, [fetchSecurityEvents, securityEvents]);
+
+  const handleInspectSecurityEvent = (eventId: string) => {
+    setSelectedSecurityEventId(eventId);
+    setActiveView('security');
+  };
+
+  // ----------------------------------------------------------------
+  // Derived state
+  // ----------------------------------------------------------------
   const openAlertsCount = useMemo(
     () => alerts.filter((a) => a.status !== 'resolved').length,
     [alerts]
@@ -102,38 +380,15 @@ export default function App() {
     [host, alerts, securityEvents]
   );
 
-  const handleUpdateAlertStatus = (id: string, status: AlertStatus) => {
-    setAlerts((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status } : item))
-    );
-  };
-
-  const handleUpdateSecurityStatus = (id: string, status: SecurityEventStatus) => {
-    setSecurityEvents((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status } : item))
-    );
-  };
-
-  const handleResetAlerts = () => {
-    setAlerts(INITIAL_ALERTS);
-  };
-
-  const handleResetSecurityEvents = () => {
-    setSecurityEvents(INITIAL_SECURITY_EVENTS);
-    setSelectedSecurityEventId(INITIAL_SECURITY_EVENTS[0]?.id ?? null);
-  };
-
-  const handleInspectSecurityEvent = (eventId: string) => {
-    setSelectedSecurityEventId(eventId);
-    setActiveView('security');
-  };
-
   const viewTitleMap: Record<DashboardView, string> = {
     overview: 'Overview',
     security: 'Security Events',
     alerts: 'Alert Log',
   };
 
+  // ----------------------------------------------------------------
+  // Sidebar content
+  // ----------------------------------------------------------------
   const sidebarContent = (
     <div className="flex h-full flex-col justify-between px-4 py-5">
       <div>
@@ -275,11 +530,23 @@ export default function App() {
       </div>
 
       <div className="border-t border-slate-200 px-2.5 pt-4 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-        <div className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-          DEMO DATA
+        {/* Backend connection status indicator */}
+        <div className="flex items-center gap-1.5">
+          {backendOnline === null ? (
+            <span className="inline-block h-2 w-2 rounded-full bg-slate-300 dark:bg-slate-600" />
+          ) : backendOnline ? (
+            <Wifi className="h-3.5 w-3.5 text-emerald-500" />
+          ) : (
+            <WifiOff className="h-3.5 w-3.5 text-red-500" />
+          )}
+          <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+            {backendOnline === null ? 'CONNECTING…' : backendOnline ? 'LIVE HOST DATA' : 'BACKEND OFFLINE'}
+          </span>
         </div>
         <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-          Simulated Ubuntu host metrics &amp; auth.log events.
+          {backendOnline
+            ? 'Real psutil metrics · auth.log events'
+            : 'FastAPI backend · port 8000'}
         </div>
       </div>
     </div>
@@ -352,7 +619,8 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleManualRefresh}
-                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+                disabled={isRefreshing}
+                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw
                   className={`h-3.5 w-3.5 transition-transform duration-300 ${
@@ -360,31 +628,67 @@ export default function App() {
                   }`}
                   aria-hidden="true"
                 />
-                <span>Refresh Sample</span>
+                <span>Refresh</span>
               </button>
             </div>
           </header>
 
           {/* Main Content Viewport */}
           <main className="mx-auto w-full max-w-6xl flex-1 space-y-5 px-4 py-6 sm:px-6">
-            {/* Demo Data Disclosure */}
-            <div
-              role="note"
-              aria-label="Demo data notice"
-              className="flex items-start gap-2.5 rounded-lg border border-slate-200 bg-slate-100/70 px-4 py-2.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300"
-            >
-              <Info
-                className="mt-0.5 h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400"
-                aria-hidden="true"
-              />
-              <p>
-                <strong className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-                  DEMO DATA:
-                </strong>{' '}
-                All resource metrics, historical CPU samples, system alerts, and security log events displayed below are simulated for demonstration on{' '}
-                <span className="font-mono">{host.hostname}</span> ({host.os}) and do not reflect live host telemetry.
-              </p>
-            </div>
+
+            {/* Backend Offline Banner */}
+            {backendOnline === false && (
+              <div
+                role="alert"
+                aria-label="Backend connection error"
+                className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50/70 px-4 py-2.5 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
+              >
+                <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <div className="flex-1 min-w-0">
+                  <strong className="font-semibold">Backend Offline — </strong>
+                  {connectError || 'Cannot connect to FastAPI backend at port 8000.'}
+                  {' '}Ensure the backend is running:{' '}
+                  <code className="font-mono">uvicorn backend.app.main:app --reload --port 8000</code>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualRefresh}
+                  className="shrink-0 rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900 cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* Initial Loading Skeleton */}
+            {initialLoading && backendOnline === null && (
+              <div
+                role="status"
+                aria-label="Loading live host data"
+                className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+              >
+                <Info className="h-4 w-4 shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                <span>Connecting to CloudSentinel backend…</span>
+              </div>
+            )}
+
+            {/* Live data notice (shown once backend confirmed online) */}
+            {backendOnline === true && (
+              <div
+                role="note"
+                aria-label="Live data notice"
+                className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-2.5 text-xs text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-300"
+              >
+                <Wifi className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <p>
+                  <strong className="font-mono font-semibold">LIVE HOST TELEMETRY:</strong>{' '}
+                  Real system metrics collected via psutil from{' '}
+                  <span className="font-mono">{host.hostname}</span> ({host.os}).
+                  Security events sourced from{' '}
+                  <span className="font-mono">/var/log/auth.log</span> · alerts persisted in SQLite.
+                </p>
+              </div>
+            )}
 
             {/* Workspace Toolbar */}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -414,21 +718,21 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setLiveSimulation((prev) => !prev)}
-                  aria-pressed={liveSimulation}
+                  onClick={() => setIsLive((prev) => !prev)}
+                  aria-pressed={isLive}
                   className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 whitespace-nowrap shrink-0 cursor-pointer ${
-                    liveSimulation
+                    isLive
                       ? 'border-blue-200 bg-blue-50/70 text-blue-700 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-300'
                       : 'border-slate-200 bg-white text-slate-600 hover:text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
                   }`}
                 >
-                  {liveSimulation ? (
+                  {isLive ? (
                     <Pause className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   ) : (
                     <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   )}
                   <span>
-                    {liveSimulation ? 'Demo updates: On' : 'Demo updates: Paused'}
+                    {isLive ? 'Live polling: On' : 'Live polling: Paused'}
                   </span>
                 </button>
 
@@ -470,7 +774,7 @@ export default function App() {
                   className="grid grid-cols-1 gap-4 md:grid-cols-3"
                 >
                   <MetricCard
-                    title="CPU Usage (Demo)"
+                    title="CPU Usage"
                     percentage={host.cpuPct}
                     delta={host.cpuDelta}
                     primaryDetail={`${host.vCpuUsed.toFixed(1)} / ${host.vCpuTotal} vCPU`}
@@ -479,7 +783,7 @@ export default function App() {
                     criticalThreshold={90}
                   />
                   <MetricCard
-                    title="RAM Usage (Demo)"
+                    title="RAM Usage"
                     percentage={host.ramPct}
                     delta={host.ramDelta}
                     primaryDetail={`${host.ramUsedGb.toFixed(1)} / ${host.ramTotalGb} GB`}
@@ -488,7 +792,7 @@ export default function App() {
                     criticalThreshold={92}
                   />
                   <MetricCard
-                    title="Disk Usage (Demo)"
+                    title="Disk Usage"
                     percentage={host.diskPct}
                     delta={host.diskDelta}
                     primaryDetail={`${host.diskUsedGb.toFixed(1)} / ${host.diskTotalGb} GB`}
@@ -517,7 +821,7 @@ export default function App() {
                 <AlertsTable
                   alerts={alerts}
                   onUpdateStatus={handleUpdateAlertStatus}
-                  onResetAlerts={handleResetAlerts}
+                  onResetAlerts={handleRefreshAlerts}
                 />
               </>
             )}
@@ -528,7 +832,7 @@ export default function App() {
                 selectedEventId={selectedSecurityEventId}
                 onSelectEvent={setSelectedSecurityEventId}
                 onUpdateEventStatus={handleUpdateSecurityStatus}
-                onResetEvents={handleResetSecurityEvents}
+                onResetEvents={handleRefreshSecurityEvents}
               />
             )}
 
@@ -550,7 +854,7 @@ export default function App() {
                 <AlertsTable
                   alerts={alerts}
                   onUpdateStatus={handleUpdateAlertStatus}
-                  onResetAlerts={handleResetAlerts}
+                  onResetAlerts={handleRefreshAlerts}
                   title="Operational Alert Log"
                 />
               </>

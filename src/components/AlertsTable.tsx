@@ -135,8 +135,8 @@ export function AlertsTable({
           <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
             ·
           </span>
-          <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400">
-            DEMO DATA
+          <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+            SQLITE PERSISTENT
           </span>
         </div>
 
@@ -228,7 +228,7 @@ export function AlertsTable({
               className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-slate-500 transition-colors hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              Restore Demo Alerts
+              Refresh Alerts
             </button>
           </div>
         </div>

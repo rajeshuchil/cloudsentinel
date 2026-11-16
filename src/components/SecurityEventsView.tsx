@@ -233,8 +233,8 @@ export function SecurityEventsView({
               <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
                 ·
               </span>
-              <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                DEMO DATA
+              <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                LIVE AUTH LOG
               </span>
             </div>
 
@@ -333,7 +333,7 @@ export function SecurityEventsView({
                 className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                Restore Demo Events
+                Refresh Events
               </button>
             </div>
           </div>
