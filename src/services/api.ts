@@ -250,10 +250,28 @@ export function mapApiSecurityEventToUi(apiEvent: ApiSecurityEvent): SecurityEve
   const timestamp = `${formattedDate} ${formattedTime}`;
 
   const attempts = apiEvent.attempts || 1;
-  const ipOriginNote =
-    attempts > 1
-      ? `${attempts} consecutive attempts detected`
-      : 'Standard authentication failure';
+  const sourceIp = apiEvent.source_ip || 'N/A';
+
+  // Neutral wording for IP provenance and test/documentation ranges
+  let ipOriginNote: string;
+  if (sourceIp.startsWith('198.51.100.')) {
+    ipOriginNote = 'Historical record (TEST-NET-2 · Unverified provenance)';
+  } else if (sourceIp.startsWith('192.0.2.') || sourceIp.startsWith('203.0.113.')) {
+    ipOriginNote = 'Documentation range (RFC 5737 · Unverified provenance)';
+  } else if (
+    sourceIp.startsWith('10.') ||
+    sourceIp.startsWith('192.168.') ||
+    sourceIp.startsWith('172.16.') ||
+    sourceIp.startsWith('172.17.') ||
+    sourceIp.startsWith('172.18.') ||
+    sourceIp.startsWith('127.')
+  ) {
+    ipOriginNote = 'Local / internal network address';
+  } else if (attempts > 1) {
+    ipOriginNote = `${attempts} repeated failure records`;
+  } else {
+    ipOriginNote = 'Authentication failure record';
+  }
 
   return {
     id: apiEvent.id,
@@ -261,7 +279,7 @@ export function mapApiSecurityEventToUi(apiEvent: ApiSecurityEvent): SecurityEve
     category,
     timestamp,
     epochMs,
-    sourceIp: apiEvent.source_ip || 'N/A',
+    sourceIp,
     ipOriginNote,
     targetUser: apiEvent.target_user || 'unknown',
     service: apiEvent.service || 'sshd',
@@ -271,3 +289,89 @@ export function mapApiSecurityEventToUi(apiEvent: ApiSecurityEvent): SecurityEve
     status: 'open' as SecurityEventStatus,
   };
 }
+
+/**
+ * Intelligent network interface selector.
+ * Prioritizes physical Wi-Fi (wl*) and Ethernet (en*, eth*) interfaces over
+ * virtual bridges (docker*, br-*, veth*, virbr*) and loopback (lo).
+ * Does not hardcode any specific interface name.
+ */
+export function selectPrimaryNetworkInterface(
+  interfaces: { name: string; is_up: boolean | null; addresses: { family: string; address: string }[] }[],
+  fallbackInterface = 'eth0',
+  fallbackIp = '127.0.0.1'
+): { networkInterface: string; ipAddress: string } {
+  if (!interfaces || interfaces.length === 0) {
+    return { networkInterface: fallbackInterface, ipAddress: fallbackIp };
+  }
+
+  function getInterfaceScore(name: string, isUp: boolean, ipv4: string): number {
+    const lower = name.toLowerCase();
+
+    // Loopback
+    if (ipv4.startsWith('127.') || lower === 'lo') {
+      return 1;
+    }
+
+    // Virtual / container bridges / tunnels
+    const isVirtual =
+      lower.startsWith('docker') ||
+      lower.startsWith('br-') ||
+      lower.startsWith('veth') ||
+      lower.startsWith('virbr') ||
+      lower.startsWith('vmnet') ||
+      lower.startsWith('vbox') ||
+      lower.startsWith('tun') ||
+      lower.startsWith('tap') ||
+      lower.startsWith('tailscale') ||
+      lower.startsWith('wg');
+
+    let score = 20;
+
+    if (isVirtual) {
+      score = 10;
+    } else if (
+      lower.startsWith('wl') || // Wireless (wlo1, wlan0, wlp...)
+      lower.startsWith('en') || // Ethernet (eno1, enp3s0, ens33, enx...)
+      lower.startsWith('eth')   // Traditional ethernet (eth0, eth1...)
+    ) {
+      score = 100;
+    } else {
+      score = 50;
+    }
+
+    if (isUp) {
+      score += 20;
+    }
+
+    // Deprioritize link-local 169.254.x.x
+    if (!ipv4.startsWith('169.254.')) {
+      score += 5;
+    }
+
+    return score;
+  }
+
+  let best: { name: string; ip: string; score: number } | null = null;
+
+  for (const iface of interfaces) {
+    const isUp = Boolean(iface.is_up);
+    const ipv4List = (iface.addresses || [])
+      .filter((a) => a.family === 'IPv4' && a.address)
+      .map((a) => a.address);
+
+    for (const ip of ipv4List) {
+      const score = getInterfaceScore(iface.name, isUp, ip);
+      if (!best || score > best.score) {
+        best = { name: iface.name, ip, score };
+      }
+    }
+  }
+
+  if (best && best.score > 0) {
+    return { networkInterface: best.name, ipAddress: best.ip };
+  }
+
+  return { networkInterface: fallbackInterface, ipAddress: fallbackIp };
+}
+

@@ -31,6 +31,8 @@ import {
   getSystemMetrics,
   mapApiAlertToAlertItem,
   mapApiSecurityEventToUi,
+  resolveAlert,
+  selectPrimaryNetworkInterface,
 } from './services/api';
 import {
   AlertItem,
@@ -42,7 +44,6 @@ import {
   TimeRange,
   UbuntuHost,
 } from './types/monitoring';
-import { resolveAlert } from './services/api';
 
 function formatShortTime(date: Date): string {
   const hh = String(date.getHours()).padStart(2, '0');
@@ -119,19 +120,12 @@ export default function App() {
       const diskUsedGb = disk.used_bytes ? Number((disk.used_bytes / 1_073_741_824).toFixed(1)) : prevHost.diskUsedGb;
       const diskMount = disk.mount_point || prevHost.diskMount;
 
-      // Determine primary interface + IP from network data
-      let networkInterface = prevHost.networkInterface;
-      let ipAddress = prevHost.ipAddress;
-      const ifaces = network?.interfaces ?? [];
-      for (const iface of ifaces) {
-        if (!iface.is_up) continue;
-        const ipv4 = iface.addresses.find((a) => a.family === 'IPv4');
-        if (ipv4 && !ipv4.address.startsWith('127.')) {
-          networkInterface = iface.name;
-          ipAddress = ipv4.address;
-          break;
-        }
-      }
+      // Determine primary interface + IP using priority scoring (Wi-Fi/Ethernet > bridge > loopback)
+      const { networkInterface, ipAddress } = selectPrimaryNetworkInterface(
+        network?.interfaces ?? [],
+        prevHost.networkInterface,
+        prevHost.ipAddress
+      );
 
       // Build a new CPU series point
       const now = new Date();

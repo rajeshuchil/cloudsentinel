@@ -42,6 +42,16 @@ export function SecuritySummarySection({
     .sort((a, b) => b.epochMs - a.epochMs)
     .slice(0, 4);
 
+  // Find IP with most failed attempts
+  const ipCounts: Record<string, number> = {};
+  for (const e of events) {
+    if (e.sourceIp && e.sourceIp !== 'N/A' && e.sourceIp !== 'unknown') {
+      ipCounts[e.sourceIp] = (ipCounts[e.sourceIp] || 0) + e.attempts;
+    }
+  }
+  const topIpEntry = Object.entries(ipCounts).sort((a, b) => b[1] - a[1])[0];
+  const topIpLabel = topIpEntry ? `Top: ${topIpEntry[0]}` : 'None flagged';
+
   const renderSeverity = (severity: AlertSeverity) => {
     if (severity === 'critical') {
       return (
@@ -87,8 +97,8 @@ export function SecuritySummarySection({
             <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
               ·
             </span>
-            <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400">
-              DEMO DATA
+            <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+              AUTH LOG MONITOR
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -117,7 +127,7 @@ export function SecuritySummarySection({
             {failedSshAttempts}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
-            sshd port 22 · 24h window
+            sshd port 22
           </div>
         </div>
 
@@ -129,7 +139,7 @@ export function SecuritySummarySection({
             {suspiciousIps.size}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
-            Top: 185.220.101.34
+            {topIpLabel}
           </div>
         </div>
 
@@ -200,7 +210,12 @@ export function SecuritySummarySection({
                   {event.timestamp}
                 </td>
                 <td className="px-3 py-2.5 font-mono font-medium text-slate-900 tabular-nums whitespace-nowrap dark:text-slate-100">
-                  {event.sourceIp}
+                  <div>{event.sourceIp}</div>
+                  {event.ipOriginNote && (
+                    <div className="text-[10px] font-sans font-normal text-slate-500 dark:text-slate-400">
+                      {event.ipOriginNote}
+                    </div>
+                  )}
                 </td>
                 <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap dark:text-slate-300">
                   {event.targetUser} · {event.service}

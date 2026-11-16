@@ -172,7 +172,7 @@ export function SecurityEventsView({
             {summary.failedSsh}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
-            DEMO DATA · sshd port 22
+            sshd service failures
           </div>
         </div>
 
@@ -184,7 +184,7 @@ export function SecurityEventsView({
             {summary.suspiciousIps}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
-            DEMO DATA · External sources
+            Flagged source addresses
           </div>
         </div>
 
@@ -196,7 +196,7 @@ export function SecurityEventsView({
             {summary.totalAuthFailures}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
-            DEMO DATA · sshd &amp; pam_unix
+            sshd &amp; PAM auth failures
           </div>
         </div>
 
@@ -208,7 +208,7 @@ export function SecurityEventsView({
             {summary.repeatedBursts}
           </div>
           <div className="mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
-            DEMO DATA · Burst events (&ge;10 tries)
+            Burst attempts (&ge;5 tries)
           </div>
         </div>
       </section>
@@ -317,7 +317,7 @@ export function SecurityEventsView({
               No security events match your filters
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Reset filters or restore the demo security log entries.
+              Clear search filters or re-fetch security events from the backend.
             </p>
             <div className="mt-4 flex items-center gap-3">
               <button
@@ -411,7 +411,12 @@ export function SecurityEventsView({
                         {CATEGORY_LABELS[event.category]}
                       </td>
                       <td className="px-3 py-3 font-mono font-medium text-slate-900 tabular-nums whitespace-nowrap dark:text-slate-100">
-                        {event.sourceIp}
+                        <div>{event.sourceIp}</div>
+                        {event.ipOriginNote && (
+                          <div className="text-[10px] font-sans font-normal text-slate-500 dark:text-slate-400">
+                            {event.ipOriginNote}
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-3 font-mono text-slate-600 whitespace-nowrap dark:text-slate-300">
                         {event.targetUser} · {event.service}
@@ -507,8 +512,8 @@ export function SecurityEventsView({
               <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
                 ·
               </span>
-              <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                DEMO DATA
+              <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                PERSISTENT RECORD
               </span>
             </div>
 
@@ -577,7 +582,7 @@ export function SecurityEventsView({
                 {activeEvent.status}
               </div>
               <div className="mt-0.5 text-slate-500 dark:text-slate-400">
-                Simulated fail2ban / ufw review
+                {activeEvent.status === 'mitigated' ? 'Mitigated by operator' : activeEvent.status === 'acknowledged' ? 'Acknowledged by operator' : 'Pending operator review'}
               </div>
             </div>
           </div>
@@ -589,7 +594,7 @@ export function SecurityEventsView({
           <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-950">
             <div className="mb-1 flex items-center gap-1.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
               <Terminal className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span>/var/log/auth.log (Simulated Sample)</span>
+              <span>Event Details</span>
             </div>
             <pre className="overflow-x-auto font-mono text-xs leading-relaxed text-slate-800 dark:text-slate-200">
               {activeEvent.rawLogLine}

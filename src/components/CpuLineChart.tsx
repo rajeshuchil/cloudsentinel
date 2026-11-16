@@ -138,8 +138,8 @@ export function CpuLineChart({
             <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
               ·
             </span>
-            <span className="font-mono text-[11px] font-medium text-slate-500 dark:text-slate-400">
-              DEMO DATA
+            <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+              PSUTIL LIVE
             </span>
           </div>
 
@@ -294,6 +294,19 @@ export function CpuLineChart({
               strokeLinejoin="round"
               strokeLinecap="round"
             />
+          )}
+
+          {/* Empty state: shown while waiting for the first real sample */}
+          {series.length === 0 && (
+            <text
+              x={pad.left + plotW / 2}
+              y={pad.top + plotH / 2}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              className="fill-slate-400 font-mono text-[13px] dark:fill-slate-500"
+            >
+              Waiting for first CPU sample…
+            </text>
           )}
 
           {xTickIndices.map((idx) => {

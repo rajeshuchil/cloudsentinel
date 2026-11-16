@@ -59,34 +59,34 @@ function buildSeries(
 }
 
 export const INITIAL_UBUNTU_HOST: UbuntuHost = {
-  hostname: 'ubuntu-srv-01',
-  os: 'Ubuntu 24.04.1 LTS',
-  kernel: 'Linux 6.8.0-45-generic',
-  arch: 'x86_64',
-  ipAddress: '192.168.10.24',
-  networkInterface: 'eth0',
-  uptime: '14d 07h 38m',
-  cpuPct: 48.2,
-  cpuDelta: 3.4,
-  vCpuUsed: 3.9,
-  vCpuTotal: 8,
-  loadAvg: '1.42, 1.28, 1.15',
-  ramPct: 68.5,
-  ramDelta: 1.9,
-  ramUsedGb: 10.96,
-  ramTotalGb: 16,
-  ramCachedGb: 3.4,
-  diskPct: 61.4,
-  diskDelta: 0.4,
-  diskUsedGb: 314.4,
-  diskTotalGb: 512,
-  diskDevice: '/dev/nvme0n1p2',
-  diskMount: '/ (ext4)',
+  hostname: 'Loading...',
+  os: 'Ubuntu Linux',
+  kernel: '—',
+  arch: '—',
+  ipAddress: '—',
+  networkInterface: '—',
+  uptime: '—',
+  cpuPct: 0,
+  cpuDelta: 0,
+  vCpuUsed: 0,
+  vCpuTotal: 1,
+  loadAvg: '—',
+  ramPct: 0,
+  ramDelta: 0,
+  ramUsedGb: 0,
+  ramTotalGb: 0,
+  ramCachedGb: 0,
+  diskPct: 0,
+  diskDelta: 0,
+  diskUsedGb: 0,
+  diskTotalGb: 0,
+  diskDevice: '/',
+  diskMount: '/',
   cpuSeries: {
-    '15m': buildSeries(16, 1, 47.4, 5.8, { index: 12, delta: 14 }),
-    '1h': buildSeries(24, 2.5, 45.2, 7.0, { index: 18, delta: 17 }),
-    '6h': buildSeries(24, 15, 41.8, 8.4, { index: 20, delta: 19 }),
-    '24h': buildSeries(24, 60, 38.6, 10.5, { index: 16, delta: 22 }),
+    '15m': [],
+    '1h': [],
+    '6h': [],
+    '24h': [],
   },
 };
 
@@ -271,13 +271,23 @@ export function computeSystemHealth(
     host.ramPct >= 92 ||
     host.diskPct >= 90
   ) {
+    let summary = 'Critical system condition or alert recorded on host.';
+    if (host.diskPct >= 90) {
+      summary = `Root filesystem disk usage is critical (${host.diskPct.toFixed(1)}%).`;
+    } else if (host.cpuPct >= 90) {
+      summary = `Host CPU utilization is critical (${host.cpuPct.toFixed(1)}%).`;
+    } else if (host.ramPct >= 92) {
+      summary = `Host memory utilization is critical (${host.ramPct.toFixed(1)}%).`;
+    } else if (activeCriticalAlerts > 0) {
+      summary = `${activeCriticalAlerts} active critical alert${activeCriticalAlerts > 1 ? 's' : ''} requiring operator attention.`;
+    } else if (openCriticalSecurity > 0) {
+      summary = `${openCriticalSecurity} recorded security event${openCriticalSecurity > 1 ? 's' : ''} awaiting operator verification.`;
+    }
+
     return {
       status: 'critical',
       label: 'Attention Required',
-      summary:
-        openCriticalSecurity > 0
-          ? `${openCriticalSecurity} unmitigated critical security event${openCriticalSecurity > 1 ? 's' : ''} (repeated SSH / suspicious IP activity).`
-          : 'Critical system threshold or alert triggered on Ubuntu host.',
+      summary,
     };
   }
 
@@ -288,12 +298,13 @@ export function computeSystemHealth(
     host.ramPct >= 80 ||
     host.diskPct >= 75
   ) {
+    const totalWarnings = activeWarningAlerts + openWarningSecurity;
     return {
       status: 'degraded',
       label: 'Degraded',
       summary:
-        activeWarningAlerts + openWarningSecurity > 0
-          ? `${activeWarningAlerts + openWarningSecurity} active warning item${activeWarningAlerts + openWarningSecurity > 1 ? 's' : ''} awaiting review.`
+        totalWarnings > 0
+          ? `${totalWarnings} active warning item${totalWarnings > 1 ? 's' : ''} awaiting review.`
           : 'Resource utilization is above nominal baseline.',
     };
   }
