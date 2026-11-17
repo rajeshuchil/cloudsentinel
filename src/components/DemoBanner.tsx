@@ -27,6 +27,7 @@ export function DemoBanner({ onEnterAdminMode }: DemoBannerProps) {
         />
         <div className="min-w-0 text-xs">
           <span className="font-bold tracking-wide uppercase mr-2">Demo Mode</span>
+          <span className="font-mono text-[10px] bg-blue-500/40 border border-blue-300/40 px-1.5 py-0.5 rounded mr-2">PUBLIC-DEMO-BUILD-01</span>
           <span className="text-blue-100 hidden sm:inline">
             You&apos;re viewing simulated infrastructure monitoring data. No real systems or private credentials are involved.
           </span>
