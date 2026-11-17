@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Build
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies first (layer-cached when only source files change)
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# Copy application source (backend/ and agent/ are excluded by .dockerignore)
+COPY . .
+
+# Build the Vite application; outputs to dist/
+# VITE_API_BASE_URL is baked in at build time — no secrets.
+ARG VITE_API_BASE_URL=https://cloudsentinel-backend-a76u.onrender.com
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
+RUN npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Serve with Nginx (lightweight static server)
+# ─────────────────────────────────────────────────────────────────────────────
+FROM nginx:1.27-alpine AS runtime
+
+# Remove default Nginx content
+RUN rm -rf /usr/share/nginx/html/*
+
+# Copy built assets from the builder stage
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Custom Nginx configuration:
+#   - Listens on PORT env var (Cloud Run sets this to 8080 by default)
+#   - SPA fallback: unknown paths → index.html
+#   - /healthz health check
+#   - Security headers
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+# Cloud Run expects the container to listen on $PORT (default 8080).
+# The nginx.conf.template uses $PORT via envsubst.
+ENV PORT=8080
+
+EXPOSE 8080
+
+# Use envsubst to substitute $PORT at container startup, then start nginx
+CMD ["/bin/sh", "-c", "envsubst '$PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]

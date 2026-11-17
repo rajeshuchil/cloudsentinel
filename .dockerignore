@@ -1,0 +1,29 @@
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Secrets / local config ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Build output (re-created inside Docker) ───────────────────────────────────
+dist/
+
+# ── Backend (not needed for frontend image) ───────────────────────────────────
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+
+# ── Agent (not needed for frontend image) ─────────────────────────────────────
+agent/venv/
+agent/__pycache__/
+agent/**/__pycache__/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.md
+.DS_Store
