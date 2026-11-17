@@ -64,9 +64,14 @@ def get_stable_device_id() -> str:
 
 
 # Configuration Variables
-BACKEND_URL: str = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
-AGENT_TOKEN: str = os.getenv("AGENT_TOKEN", "cloudsentinel-insecure-dev-token")
+BACKEND_URL: str = os.getenv("BACKEND_URL", "https://cloudsentinel-backend-a76u.onrender.com").rstrip("/")
+AGENT_TOKEN: str = (
+    os.getenv("AGENT_API_KEY")
+    or os.getenv("AGENT_TOKEN")
+    or "cloudsentinel-insecure-dev-token"
+)
 DEVICE_ID: str = get_stable_device_id()
 TELEMETRY_INTERVAL: float = float(os.getenv("TELEMETRY_INTERVAL", "30.0"))
+HEARTBEAT_INTERVAL: float = float(os.getenv("HEARTBEAT_INTERVAL", "30.0"))
 AUTH_LOG_PATH: str = os.getenv("AUTH_LOG_PATH", "/var/log/auth.log")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

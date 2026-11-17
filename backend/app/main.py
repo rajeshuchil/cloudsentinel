@@ -50,9 +50,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Include API routers
 app.include_router(system_router)

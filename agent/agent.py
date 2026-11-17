@@ -27,6 +27,7 @@ from config import (
     AUTH_LOG_PATH,
     BACKEND_URL,
     DEVICE_ID,
+    HEARTBEAT_INTERVAL,
     LOG_LEVEL,
     TELEMETRY_INTERVAL,
 )
@@ -307,20 +308,25 @@ def collect_system_metrics() -> Dict[str, Any]:
 
 
 class AgentClient:
-    """Manages telemetry transmission and backoff recovery to CloudSentinel backend."""
+    """Manages telemetry transmission, heartbeat pings, and backoff recovery to CloudSentinel backend."""
     def __init__(self, backend_url: str = BACKEND_URL, token: str = AGENT_TOKEN, device_id: str = DEVICE_ID):
-        self.endpoint = f"{backend_url}/api/agent/telemetry"
+        self.telemetry_endpoint = f"{backend_url}/api/agent/telemetry"
+        self.heartbeat_endpoint = f"{backend_url}/api/agent/heartbeat"
         self.token = token
         self.device_id = device_id
         self.backoff_delay = 0.0
         self.max_backoff = 30.0
         self.pending_security_events: collections.deque = collections.deque(maxlen=200)
+        self.pending_event_ids: set = set()
 
     def send_telemetry(self, metrics: Dict[str, Any], security_events: List[Dict[str, Any]]) -> bool:
         """Transmit telemetry payload to backend. Buffers events if connection fails."""
-        # Queue any new security events
+        # Queue any new security events without duplicates
         for evt in security_events:
-            self.pending_security_events.append(evt)
+            evt_id = evt.get("id")
+            if evt_id and evt_id not in self.pending_event_ids:
+                self.pending_event_ids.add(evt_id)
+                self.pending_security_events.append(evt)
 
         events_to_send = list(self.pending_security_events)
 
@@ -337,7 +343,7 @@ class AgentClient:
 
         data_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            self.endpoint,
+            self.telemetry_endpoint,
             data=data_bytes,
             headers={
                 "Content-Type": "application/json",
@@ -348,10 +354,11 @@ class AgentClient:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
+            # 35s timeout to absorb Render cold boot latency (~30-50s)
+            with urllib.request.urlopen(req, timeout=35.0) as resp:
                 if resp.status in (200, 201):
-                    # Successfully delivered: clear delivered security events
                     self.pending_security_events.clear()
+                    self.pending_event_ids.clear()
                     if self.backoff_delay > 0:
                         logger.info("Connection to CloudSentinel restored. Host is ONLINE.")
                         self.backoff_delay = 0.0
@@ -363,17 +370,27 @@ class AgentClient:
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                logger.error("Authentication failed: invalid AGENT_TOKEN. Check token configuration.")
+                logger.error("Authentication failed: invalid AGENT_TOKEN / AGENT_API_KEY. Verify agent configuration.")
+            elif e.code == 404:
+                logger.warning("Endpoint %s not found (HTTP 404).", self.telemetry_endpoint)
             elif e.code == 413:
                 logger.error("Payload too large (HTTP 413). Reducing security event queue.")
                 self.pending_security_events.clear()
+                self.pending_event_ids.clear()
+            elif e.code in (502, 503, 504):
+                logger.info("Render service waking up / gateway response (HTTP %s). Retrying...", e.code)
             else:
                 logger.warning("HTTP error delivering telemetry (%s): %s", e.code, e.reason)
             self._increase_backoff()
             return False
 
         except urllib.error.URLError as e:
-            logger.warning("Network unreachable: %s (will retry in %.1fs)", e.reason, max(self.backoff_delay, TELEMETRY_INTERVAL))
+            logger.warning("Backend unreachable: %s (Render may be sleeping, will retry)", e.reason)
+            self._increase_backoff()
+            return False
+
+        except TimeoutError:
+            logger.warning("Request timed out (Render free-tier cold start in progress). Retrying...")
             self._increase_backoff()
             return False
 
@@ -382,10 +399,43 @@ class AgentClient:
             self._increase_backoff()
             return False
 
+    def send_heartbeat(self) -> bool:
+        """Send lightweight heartbeat ping to refresh last_seen timestamp."""
+        payload = {"device_id": self.device_id}
+        data_bytes = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.heartbeat_endpoint,
+            data=data_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-Agent-Token": self.token,
+                "User-Agent": f"CloudSentinel-Agent/1.0 ({platform.node()})",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                if resp.status in (200, 201):
+                    logger.debug("Heartbeat ping acknowledged (device: %s).", self.device_id)
+                    return True
+                return False
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logger.debug("Heartbeat 404 (device pending initial telemetry registration).")
+            elif e.code == 401:
+                logger.error("Heartbeat authentication failed: invalid token.")
+            else:
+                logger.debug("Heartbeat HTTP status: %s", e.code)
+            return False
+        except Exception as e:
+            logger.debug("Heartbeat transmission issue: %s", e)
+            return False
+
     def _increase_backoff(self) -> None:
         """Apply exponential backoff on network failures."""
         if self.backoff_delay == 0.0:
-            self.backoff_delay = 2.0
+            self.backoff_delay = 3.0
         else:
             self.backoff_delay = min(self.max_backoff, self.backoff_delay * 2)
 
@@ -394,7 +444,8 @@ def main():
     logger.info("Starting CloudSentinel Monitoring Agent...")
     logger.info("Device ID: %s", DEVICE_ID)
     logger.info("Backend Target: %s", BACKEND_URL)
-    logger.info("Interval: %s seconds", TELEMETRY_INTERVAL)
+    logger.info("Telemetry Interval: %s seconds", TELEMETRY_INTERVAL)
+    logger.info("Heartbeat Interval: %s seconds", HEARTBEAT_INTERVAL)
 
     # Initial CPU sample
     psutil.cpu_percent(interval=None)
@@ -412,32 +463,40 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    last_telemetry_time = 0.0
+    last_heartbeat_time = 0.0
+
     while running:
-        loop_start = time.time()
-        try:
-            # 1. Collect telemetry
-            metrics = collect_system_metrics()
+        now = time.time()
 
-            # 2. Read new security events
-            new_events = log_monitor.read_new_events()
+        # 1. Telemetry transmission cycle (every TELEMETRY_INTERVAL seconds or after backoff)
+        if now - last_telemetry_time >= (client.backoff_delay or TELEMETRY_INTERVAL):
+            try:
+                metrics = collect_system_metrics()
+                new_events = log_monitor.read_new_events()
+                success = client.send_telemetry(metrics, new_events)
+                if success:
+                    logger.info("Telemetry delivered (CPU: %.1f%%, RAM: %.1f%%, Disk: %.1f%%)",
+                                metrics["cpu"]["usage_percent"],
+                                metrics["memory"]["usage_percent"],
+                                metrics["disk"]["usage_percent"])
+                    last_telemetry_time = now
+                    last_heartbeat_time = now
+            except Exception as e:
+                logger.error("Error in telemetry cycle: %s", e, exc_info=True)
 
-            # 3. Transmit to backend
-            success = client.send_telemetry(metrics, new_events)
-            if success:
-                logger.debug("Telemetry sent successfully (CPU: %.1f%%, RAM: %.1f%%)",
-                             metrics["cpu"]["usage_percent"], metrics["memory"]["usage_percent"])
+        # 2. Heartbeat cycle (every HEARTBEAT_INTERVAL seconds)
+        now = time.time()
+        if now - last_heartbeat_time >= HEARTBEAT_INTERVAL:
+            try:
+                hb_success = client.send_heartbeat()
+                if hb_success:
+                    last_heartbeat_time = now
+            except Exception as e:
+                logger.debug("Error in heartbeat cycle: %s", e)
 
-        except Exception as e:
-            logger.error("Unhandled error in agent loop: %s", e, exc_info=True)
-
-        # Sleep respecting interval and any backoff delay
-        elapsed = time.time() - loop_start
-        sleep_time = max(1.0, (client.backoff_delay or TELEMETRY_INTERVAL) - elapsed)
-
-        # Sleep in small slices to respond promptly to shutdown signals
-        end_time = time.time() + sleep_time
-        while running and time.time() < end_time:
-            time.sleep(0.5)
+        # Responsive sleep
+        time.sleep(1.0)
 
     logger.info("CloudSentinel Monitoring Agent stopped.")
 

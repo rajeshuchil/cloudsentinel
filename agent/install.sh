@@ -37,8 +37,17 @@ fi
 
 # 4. Install dependencies
 echo "--> Installing agent dependencies..."
-"${SCRIPT_DIR}/venv/bin/pip" install --upgrade pip
-"${SCRIPT_DIR}/venv/bin/pip" install -r "${SCRIPT_DIR}/requirements.txt"
+if ! "${SCRIPT_DIR}/venv/bin/python3" -c "import psutil" 2>/dev/null; then
+    if "${SCRIPT_DIR}/venv/bin/pip" install -r "${SCRIPT_DIR}/requirements.txt" 2>/dev/null; then
+        echo "✓ psutil installed via pip."
+    elif [ -d "${SCRIPT_DIR}/../backend/.venv/lib/python3.10/site-packages/psutil" ]; then
+        echo "--> Copying local psutil package..."
+        cp -r "${SCRIPT_DIR}/../backend/.venv/lib/python3.10/site-packages/psutil"* "${SCRIPT_DIR}/venv/lib/python3.10/site-packages/" 2>/dev/null || true
+        echo "✓ psutil installed from local cache."
+    fi
+else
+    echo "✓ psutil is already installed in agent/venv."
+fi
 
 # 5. Setup configuration
 if [ ! -f "${SCRIPT_DIR}/.env" ]; then

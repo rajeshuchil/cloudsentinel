@@ -49,6 +49,7 @@ export interface UbuntuHost {
   diskDevice: string;
   diskMount: string;
   deviceStatus?: 'online' | 'offline';
+  lastHeartbeat?: string;
   cpuSeries: Record<TimeRange, CpuPoint[]>;
 }
 
@@ -139,6 +140,8 @@ export interface ApiSystemResponse {
     interfaces: ApiNetworkInterface[];
   };
   device_status?: 'online' | 'offline';
+  timestamp?: string;
+  last_seen?: string;
 }
 
 export interface ApiSecurityEvent {

@@ -164,6 +164,16 @@ export default function App() {
         loadAvg = `${cpu.load_average['1m']} / ${cpu.load_average['5m']} / ${cpu.load_average['15m']}`;
       }
 
+      // Determine last heartbeat display
+      let lastHeartbeat = prevHost.lastHeartbeat;
+      if (data.timestamp || data.last_seen) {
+        const rawTs = data.timestamp || data.last_seen;
+        const d = new Date(rawTs!);
+        lastHeartbeat = isNaN(d.getTime()) ? rawTs : formatShortTime(d);
+      } else if (deviceStatus === 'online') {
+        lastHeartbeat = formatShortTime(new Date());
+      }
+
       return {
         ...prevHost,
         hostname: system.hostname || prevHost.hostname,
@@ -174,6 +184,7 @@ export default function App() {
         ipAddress,
         networkInterface,
         deviceStatus,
+        lastHeartbeat,
         cpuPct,
         cpuDelta,
         vCpuTotal: cpu.logical_cores ?? prevHost.vCpuTotal,
@@ -834,7 +845,7 @@ export default function App() {
                     {host.deviceStatus === 'offline' ? 'DEVICE OFFLINE:' : 'LIVE HOST TELEMETRY:'}
                   </strong>{' '}
                   {host.deviceStatus === 'offline'
-                    ? `Ubuntu host ${host.hostname} has not reported within 60s. Displaying preserved telemetry.`
+                    ? `Ubuntu host ${host.hostname} has not reported within 60s. Displaying preserved telemetry${host.lastHeartbeat ? ` (last heartbeat: ${host.lastHeartbeat})` : ''}.`
                     : `Real system metrics collected via psutil from ${host.hostname} (${host.os}). Security events sourced from /var/log/auth.log · alerts persisted in database.`}
                 </p>
               </div>
@@ -879,6 +890,16 @@ export default function App() {
                     />
                     {host.deviceStatus === 'offline' ? 'OFFLINE' : 'ONLINE'}
                   </span>
+                  {host.lastHeartbeat && (
+                    <>
+                      <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
+                        ·
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500">
+                        Heartbeat: {host.lastHeartbeat}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 
