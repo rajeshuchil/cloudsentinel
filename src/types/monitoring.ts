@@ -25,6 +25,7 @@ export interface CpuPoint {
 }
 
 export interface UbuntuHost {
+  deviceId?: string;
   hostname: string;
   os: string;
   kernel: string;
@@ -50,6 +51,7 @@ export interface UbuntuHost {
   diskMount: string;
   deviceStatus?: 'online' | 'offline';
   lastHeartbeat?: string;
+  recordedAt?: string;
   cpuSeries: Record<TimeRange, CpuPoint[]>;
 }
 
@@ -132,6 +134,7 @@ export interface ApiNetworkInterface {
 }
 
 export interface ApiSystemResponse {
+  device_id?: string;
   system: ApiSystemInfo;
   cpu: ApiCpuMetrics;
   memory: ApiMemoryMetrics;
@@ -141,7 +144,34 @@ export interface ApiSystemResponse {
   };
   device_status?: 'online' | 'offline';
   timestamp?: string;
+  recorded_at?: string;
   last_seen?: string;
+}
+
+export interface ApiDevice {
+  id: string;
+  hostname: string;
+  ip_address: string;
+  os: string;
+  kernel: string;
+  arch: string;
+  status: 'online' | 'offline';
+  last_seen: string;
+  last_telemetry?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiDevicesResponse {
+  status: string;
+  total: number;
+  devices: ApiDevice[];
+  error?: string;
+}
+
+export interface ApiDeviceResponse {
+  status: string;
+  device: ApiDevice;
 }
 
 export interface ApiSecurityEvent {

@@ -4,6 +4,9 @@ import {
   AlertStatus,
   ApiAlert,
   ApiAlertsResponse,
+  ApiDevice,
+  ApiDeviceResponse,
+  ApiDevicesResponse,
   ApiEvaluateAlertsResponse,
   ApiSecurityEvent,
   ApiSecurityEventsResponse,
@@ -14,19 +17,16 @@ import {
 } from '../types/monitoring';
 
 export const DEFAULT_API_BASE_URL = 'https://cloudsentinel-backend-a76u.onrender.com';
-export const DEFAULT_API_KEY = '71b3cffb19514d0d9bfcec37355ad173ece837aed7710e4d';
 
 /**
- * Dynamically resolves the API base URL with graceful production fallbacks:
- * 1. Vite environment variable (VITE_API_BASE_URL from .env or build flags)
- * 2. Window runtime global (__CLOUDSENTINEL_API_URL__)
- * 3. URL query parameter (?api_url=https://...)
- * 4. LocalStorage ('CLOUDSENTINEL_API_BASE_URL')
- * 5. Production Render backend fallback (ensures HTTPS deployments do not attempt blocked localhost calls)
+ * Dynamically resolves the API base URL with production defaults:
+ * 1. Window runtime global (__CLOUDSENTINEL_API_URL__)
+ * 2. URL query parameter (?api_url=https://...)
+ * 3. LocalStorage ('CLOUDSENTINEL_API_BASE_URL')
+ * 4. Vite environment variable (VITE_API_BASE_URL)
+ * 5. Production Render backend fallback
  */
 export function resolveApiBaseUrl(): string {
-  const envUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-
   if (typeof window !== 'undefined') {
     const win = window as unknown as { __CLOUDSENTINEL_API_URL__?: string };
     if (win.__CLOUDSENTINEL_API_URL__) {
@@ -51,62 +51,54 @@ export function resolveApiBaseUrl(): string {
     } catch {
       // storage unavailable
     }
-
-    // If served over HTTPS, avoid insecure http://127.0.0.1 or localhost (blocked by Chrome mixed-content policy)
-    if (
-      window.location.protocol === 'https:' &&
-      (!envUrl || envUrl.includes('127.0.0.1') || envUrl.includes('localhost'))
-    ) {
-      return DEFAULT_RENDER_BACKEND_URL;
-    }
   }
 
+  const envUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
   if (envUrl && envUrl.length > 0) {
     return envUrl.replace(/\/+$/, '');
   }
 
-  return DEFAULT_RENDER_BACKEND_URL;
+  return DEFAULT_API_BASE_URL;
 }
 
-const DEFAULT_RENDER_BACKEND_URL = DEFAULT_API_BASE_URL;
+const SESSION_API_KEY_STORAGE = 'CLOUDSENTINEL_DASHBOARD_KEY';
 
 /**
- * Dynamically resolves the Dashboard API Key with fallbacks:
- * 1. Vite environment variable (VITE_API_KEY)
- * 2. Window runtime global (__CLOUDSENTINEL_API_KEY__)
- * 3. URL query parameter (?api_key=...)
- * 4. LocalStorage ('CLOUDSENTINEL_API_KEY')
- * 5. Production Render key fallback
+ * Dynamically retrieves the Dashboard API Key from browser sessionStorage.
+ * Secrets are never hardcoded or stored in client-side bundles or git.
  */
-export function resolveDashboardApiKey(): string | undefined {
-  const envKey = (import.meta.env.VITE_API_KEY as string | undefined)?.trim();
-  if (envKey) return envKey;
-
+export function getDashboardApiKey(): string | null {
   if (typeof window !== 'undefined') {
-    const win = window as unknown as { __CLOUDSENTINEL_API_KEY__?: string };
-    if (win.__CLOUDSENTINEL_API_KEY__) return win.__CLOUDSENTINEL_API_KEY__.trim();
-
     try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const queryKey = urlParams.get('api_key');
-      if (queryKey) return queryKey.trim();
+      const stored = window.sessionStorage.getItem(SESSION_API_KEY_STORAGE);
+      if (stored && stored.trim()) {
+        return stored.trim();
+      }
     } catch {
-      // ignore
-    }
-
-    try {
-      const storedKey = window.localStorage.getItem('CLOUDSENTINEL_API_KEY');
-      if (storedKey) return storedKey.trim();
-    } catch {
-      // ignore
+      // session storage unavailable
     }
   }
+  return null;
+}
 
-  return DEFAULT_API_KEY;
+/**
+ * Stores the Dashboard API Key securely into the current browser session.
+ */
+export function setDashboardApiKey(key: string | null): void {
+  if (typeof window !== 'undefined') {
+    try {
+      if (key && key.trim()) {
+        window.sessionStorage.setItem(SESSION_API_KEY_STORAGE, key.trim());
+      } else {
+        window.sessionStorage.removeItem(SESSION_API_KEY_STORAGE);
+      }
+    } catch {
+      // session storage unavailable
+    }
+  }
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
-export const DASHBOARD_API_KEY = resolveDashboardApiKey();
 
 export class ApiError extends Error {
   status: number;
@@ -122,7 +114,7 @@ export class ApiError extends Error {
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const baseUrl = resolveApiBaseUrl();
-  const apiKey = resolveDashboardApiKey();
+  const apiKey = getDashboardApiKey();
   const url = `${baseUrl}${endpoint}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -178,10 +170,26 @@ export async function getHealth(): Promise<{ status: string; service: string }> 
 }
 
 /**
- * Collect live host telemetry from psutil.
+ * Collect live or historical host telemetry from the backend.
+ * Optionally filter by device ID.
  */
-export async function getSystemMetrics(): Promise<ApiSystemResponse> {
-  return request<ApiSystemResponse>('/api/system');
+export async function getSystemMetrics(deviceId?: string): Promise<ApiSystemResponse> {
+  const query = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+  return request<ApiSystemResponse>(`/api/system${query}`);
+}
+
+/**
+ * Retrieve list of registered devices and their latest statuses.
+ */
+export async function getDevices(): Promise<ApiDevicesResponse> {
+  return request<ApiDevicesResponse>('/api/agent/devices');
+}
+
+/**
+ * Retrieve specific device details by device ID.
+ */
+export async function getDevice(deviceId: string): Promise<ApiDeviceResponse> {
+  return request<ApiDeviceResponse>(`/api/agent/devices/${encodeURIComponent(deviceId)}`);
 }
 
 /**

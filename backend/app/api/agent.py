@@ -251,22 +251,31 @@ def list_devices(
     Return all registered devices and their current online/offline status.
     Protected by DASHBOARD_API_KEY if configured.
     """
-    devices = get_all_devices(offline_threshold_seconds=60)
-    cleaned = []
-    for d in devices:
-        d_copy = dict(d)
-        if isinstance(d_copy.get("last_telemetry"), str):
-            try:
-                d_copy["last_telemetry"] = json.loads(d_copy["last_telemetry"])
-            except Exception:
-                pass
-        cleaned.append(d_copy)
+    try:
+        devices = get_all_devices(offline_threshold_seconds=60)
+        cleaned = []
+        for d in devices:
+            d_copy = dict(d)
+            if isinstance(d_copy.get("last_telemetry"), str):
+                try:
+                    d_copy["last_telemetry"] = json.loads(d_copy["last_telemetry"])
+                except Exception:
+                    pass
+            cleaned.append(d_copy)
 
-    return {
-        "status": "success",
-        "total": len(cleaned),
-        "devices": cleaned,
-    }
+        return {
+            "status": "success",
+            "total": len(cleaned),
+            "devices": cleaned,
+        }
+    except Exception as e:
+        logger.error("Error listing devices: %s", e, exc_info=True)
+        return {
+            "status": "error",
+            "total": 0,
+            "devices": [],
+            "error": str(e),
+        }
 
 
 @router.get("/devices/{device_id}", summary="Get Device Status")
@@ -278,18 +287,27 @@ def get_device(
     Retrieve single device by ID with liveness evaluation.
     Protected by DASHBOARD_API_KEY if configured.
     """
-    dev = get_device_by_id(device_id, offline_threshold_seconds=60)
-    if not dev:
+    try:
+        dev = get_device_by_id(device_id, offline_threshold_seconds=60)
+        if not dev:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Device {device_id} not found",
+            )
+        if isinstance(dev.get("last_telemetry"), str):
+            try:
+                dev["last_telemetry"] = json.loads(dev["last_telemetry"])
+            except Exception:
+                pass
+        return {
+            "status": "success",
+            "device": dev,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error retrieving device %s: %s", device_id, e, exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Device {device_id} not found",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error retrieving device {device_id}: {str(e)}",
         )
-    if isinstance(dev.get("last_telemetry"), str):
-        try:
-            dev["last_telemetry"] = json.loads(dev["last_telemetry"])
-        except Exception:
-            pass
-    return {
-        "status": "success",
-        "device": dev,
-    }

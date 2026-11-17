@@ -1,12 +1,16 @@
 import {
   Activity,
   Bell,
+  Check,
   Info,
+  Key,
+  Lock,
   Menu,
   Moon,
   Pause,
   Play,
   RefreshCw,
+  Server,
   ShieldAlert,
   ShieldCheck,
   Sun,
@@ -29,6 +33,8 @@ import {
   evaluateAlerts,
   formatUptime,
   getAlerts,
+  getDashboardApiKey,
+  getDevices,
   getSecurityEvents,
   getSystemMetrics,
   mapApiAlertToAlertItem,
@@ -37,10 +43,12 @@ import {
   resolveAlert,
   resolveApiBaseUrl,
   selectPrimaryNetworkInterface,
+  setDashboardApiKey,
 } from './services/api';
 import {
   AlertItem,
   AlertStatus,
+  ApiDevice,
   CpuPoint,
   DashboardView,
   SecurityEvent,
@@ -77,6 +85,15 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isLive, setIsLive] = useState<boolean>(true);
 
+  // Device & Inventory state
+  const [devices, setDevices] = useState<ApiDevice[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('ubuntu-1d77207cd91e');
+
+  // Dashboard Authentication modal state
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+  const [authKeyInput, setAuthKeyInput] = useState<string>('');
+  const [hasStoredKey, setHasStoredKey] = useState<boolean>(Boolean(getDashboardApiKey()));
+
   // Connection state
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -108,6 +125,9 @@ export default function App() {
   const applySystemMetrics = useCallback(
     (data: Awaited<ReturnType<typeof getSystemMetrics>>, prevHost: UbuntuHost): UbuntuHost => {
       const { system, cpu, memory, disk, network } = data;
+
+      const deviceId = data.device_id || selectedDeviceId;
+      const recordedAt = data.recorded_at || data.timestamp || '';
 
       const cpuPct = cpu.usage_percent ?? prevHost.cpuPct;
       const cpuDelta = Number((cpuPct - prevHost.cpuPct).toFixed(1));
@@ -164,10 +184,10 @@ export default function App() {
         loadAvg = `${cpu.load_average['1m']} / ${cpu.load_average['5m']} / ${cpu.load_average['15m']}`;
       }
 
-      // Determine last heartbeat display
+      // Determine last heartbeat / telemetry timestamp display
       let lastHeartbeat = prevHost.lastHeartbeat;
-      if (data.timestamp || data.last_seen) {
-        const rawTs = data.timestamp || data.last_seen;
+      if (recordedAt || data.timestamp || data.last_seen) {
+        const rawTs = recordedAt || data.timestamp || data.last_seen;
         const d = new Date(rawTs!);
         lastHeartbeat = isNaN(d.getTime()) ? rawTs : formatShortTime(d);
       } else if (deviceStatus === 'online') {
@@ -176,6 +196,8 @@ export default function App() {
 
       return {
         ...prevHost,
+        deviceId,
+        recordedAt,
         hostname: system.hostname || prevHost.hostname,
         os: system.os_release || system.os || prevHost.os,
         kernel: system.kernel_version || prevHost.kernel,
@@ -204,17 +226,37 @@ export default function App() {
         cpuSeries: updatedSeries,
       };
     },
-    []
+    [selectedDeviceId]
   );
+
+  // ----------------------------------------------------------------
+  // Fetch: devices list
+  // ----------------------------------------------------------------
+  const fetchDevicesList = useCallback(async () => {
+    try {
+      const res = await getDevices();
+      if (!mountedRef.current) return;
+      if (res.status === 'success' && res.devices && res.devices.length > 0) {
+        setDevices(res.devices);
+        const hasCurrent = res.devices.some((d) => d.id === selectedDeviceId);
+        if (!hasCurrent) {
+          const target = res.devices.find((d) => d.id === 'ubuntu-1d77207cd91e') || res.devices[0];
+          setSelectedDeviceId(target.id);
+        }
+      }
+    } catch (err) {
+      console.warn('[CloudSentinel] Error fetching devices inventory:', err);
+    }
+  }, [selectedDeviceId]);
 
   // ----------------------------------------------------------------
   // Fetch: system metrics
   // ----------------------------------------------------------------
   const fetchSystemMetrics = useCallback(async () => {
     const currentBaseUrl = resolveApiBaseUrl();
-    console.info(`[CloudSentinel] Polling system metrics from: ${currentBaseUrl}/api/system`);
+    console.info(`[CloudSentinel] Polling system metrics for device ${selectedDeviceId} from: ${currentBaseUrl}/api/system`);
     try {
-      const data = await getSystemMetrics();
+      const data = await getSystemMetrics(selectedDeviceId);
       if (!mountedRef.current) return;
       console.info('[CloudSentinel] Successfully received system metrics:', data);
       setBackendOnline(true);
@@ -253,7 +295,7 @@ export default function App() {
       }
       setBackendOnline(false);
     }
-  }, [applySystemMetrics]);
+  }, [selectedDeviceId, applySystemMetrics]);
 
   // ----------------------------------------------------------------
   // Fetch: security events
@@ -304,12 +346,42 @@ export default function App() {
   }, [isEvaluating, fetchAlerts, fetchSecurityEvents]);
 
   // ----------------------------------------------------------------
+  // Dashboard API Key management handlers (sessionStorage only)
+  // ----------------------------------------------------------------
+  const handleSaveAuthKey = useCallback(() => {
+    if (authKeyInput.trim()) {
+      setDashboardApiKey(authKeyInput.trim());
+      setHasStoredKey(true);
+    } else {
+      setDashboardApiKey(null);
+      setHasStoredKey(false);
+    }
+    setShowAuthModal(false);
+    setIsAuthError(false);
+    // Refresh immediately with the newly stored key
+    setTimeout(() => {
+      fetchDevicesList();
+      fetchSystemMetrics();
+      fetchAlerts();
+      fetchSecurityEvents();
+    }, 50);
+  }, [authKeyInput, fetchDevicesList, fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
+
+  const handleClearAuthKey = useCallback(() => {
+    setDashboardApiKey(null);
+    setAuthKeyInput('');
+    setHasStoredKey(false);
+    setShowAuthModal(false);
+  }, []);
+
+  // ----------------------------------------------------------------
   // Initial load on mount
   // ----------------------------------------------------------------
   useEffect(() => {
     let alive = true;
     async function initialLoad() {
       await Promise.all([
+        fetchDevicesList(),
         fetchSystemMetrics(),
         fetchSecurityEvents(),
         fetchAlerts(),
@@ -352,6 +424,7 @@ export default function App() {
     setIsRefreshing(true);
     try {
       await Promise.allSettled([
+        fetchDevicesList(),
         fetchSystemMetrics(),
         fetchAlerts(),
         fetchSecurityEvents(),
@@ -364,7 +437,7 @@ export default function App() {
         setIsRefreshing(false);
       }
     }
-  }, [fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
+  }, [fetchDevicesList, fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
 
   // ----------------------------------------------------------------
   // Alert status actions (hit the backend PATCH endpoints)
@@ -574,7 +647,38 @@ export default function App() {
               {host.deviceStatus === 'offline' ? 'OFFLINE' : 'ONLINE'}
             </span>
           </div>
+
+          {/* Device inventory selector if multiple devices exist */}
+          {devices.length > 1 && (
+            <div className="mt-3">
+              <label htmlFor="device-selector" className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                Select Device
+              </label>
+              <select
+                id="device-selector"
+                value={selectedDeviceId}
+                onChange={(e) => {
+                  setSelectedDeviceId(e.target.value);
+                  setTimeout(() => fetchSystemMetrics(), 50);
+                }}
+                className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-mono text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              >
+                {devices.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.hostname} ({d.id})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <dl className="mt-3 space-y-2 text-xs">
+            <div>
+              <dt className="text-slate-400 dark:text-slate-500">Device ID</dt>
+              <dd className="font-mono font-medium text-slate-800 dark:text-slate-200">
+                {host.deviceId || selectedDeviceId}
+              </dd>
+            </div>
             <div>
               <dt className="text-slate-400 dark:text-slate-500">Hostname</dt>
               <dd className="font-mono font-medium text-slate-800 dark:text-slate-200">
@@ -603,6 +707,14 @@ export default function App() {
                 {host.vCpuTotal} vCPU · {host.ramTotalGb} GB · {host.diskTotalGb} GB
               </dd>
             </div>
+            {host.recordedAt && (
+              <div>
+                <dt className="text-slate-400 dark:text-slate-500">Last Telemetry</dt>
+                <dd className="font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                  {host.recordedAt}
+                </dd>
+              </div>
+            )}
           </dl>
         </div>
       </div>
@@ -712,6 +824,20 @@ export default function App() {
             <div className="flex items-center gap-2.5 shrink-0">
               <button
                 type="button"
+                onClick={() => {
+                  setAuthKeyInput(getDashboardApiKey() || '');
+                  setShowAuthModal(true);
+                }}
+                aria-label="Dashboard API Key Authentication"
+                title={hasStoredKey ? 'Dashboard Key configured in session' : 'Enter Dashboard API Key'}
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Key className={`h-3.5 w-3.5 ${hasStoredKey ? 'text-emerald-500' : 'text-slate-400'}`} aria-hidden="true" />
+                <span className="hidden sm:inline">{hasStoredKey ? 'Authenticated' : 'API Key'}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={handleManualRefresh}
                 disabled={isRefreshing}
                 aria-label="Refresh Metrics"
@@ -741,18 +867,30 @@ export default function App() {
               >
                 <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
                 <div className="flex-1 min-w-0">
-                  <strong className="font-semibold">Authentication Failed (HTTP 401) — </strong>
-                  The configured <code className="font-mono">VITE_API_KEY</code> was rejected by the backend at{' '}
-                  <code className="font-mono">{API_BASE_URL}</code>. Ensure the key matches{' '}
-                  <code className="font-mono">DASHBOARD_API_KEY</code> configured in your Render service settings.
+                  <strong className="font-semibold">Authentication Required (HTTP 401) — </strong>
+                  The dashboard endpoints require authorization with <code className="font-mono">DASHBOARD_API_KEY</code>.
+                  {hasStoredKey ? ' The key in your current browser session was rejected.' : ' No key is currently configured for this session.'}
+                  {' '}Provide your dashboard key to authenticate with <code className="font-mono">{API_BASE_URL}</code>.
                 </div>
-                <button
-                  type="button"
-                  onClick={handleManualRefresh}
-                  className="shrink-0 rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900 cursor-pointer"
-                >
-                  Retry
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthKeyInput(getDashboardApiKey() || '');
+                      setShowAuthModal(true);
+                    }}
+                    className="rounded border border-red-300 bg-white px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900 cursor-pointer"
+                  >
+                    Enter Key
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleManualRefresh}
+                    className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900 cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1050,6 +1188,84 @@ export default function App() {
           </main>
         </div>
       </div>
+
+      {/* Dashboard Authentication Key Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <Key className="h-5 w-5 text-blue-600 dark:text-blue-500" />
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Dashboard Authentication
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(false)}
+                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200 cursor-pointer"
+                aria-label="Close modal"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3 text-xs text-slate-600 dark:text-slate-300">
+              <p>
+                Enter your <strong className="font-mono text-slate-900 dark:text-slate-100">DASHBOARD_API_KEY</strong> to authenticate requests to the deployed backend.
+              </p>
+              <div className="rounded-md bg-blue-50/70 p-3 text-blue-700 dark:bg-blue-950/30 dark:text-blue-300 text-[11px]">
+                <strong>Security Protection:</strong> This key is held strictly in browser <code className="font-mono">sessionStorage</code>. It is never baked into production frontend bundles, never committed to git, and is cleared when the tab closes.
+              </div>
+
+              <div>
+                <label htmlFor="auth-key-input" className="block font-medium text-slate-700 dark:text-slate-300 mb-1">
+                  API Key:
+                </label>
+                <input
+                  id="auth-key-input"
+                  type="password"
+                  value={authKeyInput}
+                  onChange={(e) => setAuthKeyInput(e.target.value)}
+                  placeholder="Paste DASHBOARD_API_KEY"
+                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-between gap-3">
+              {hasStoredKey ? (
+                <button
+                  type="button"
+                  onClick={handleClearAuthKey}
+                  className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/50 dark:text-red-400 cursor-pointer"
+                >
+                  Clear Stored Key
+                </button>
+              ) : (
+                <div />
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAuthModal(false)}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveAuthKey}
+                  className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 cursor-pointer"
+                >
+                  Save &amp; Connect
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

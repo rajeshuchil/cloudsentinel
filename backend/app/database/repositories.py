@@ -468,15 +468,61 @@ def get_device_by_id(
         FROM devices
         WHERE id = ?
     """
-    with get_db_connection(db_path) as conn:
-        row = conn.execute(query, (device_id,)).fetchone()
-        if not row:
-            return None
-        dev = dict(row)
+    try:
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(query, (device_id,)).fetchone()
+            if not row:
+                # If not in devices, check if it exists in telemetry_history
+                latest_th = get_latest_telemetry_for_device(device_id, db_path=db_path)
+                if not latest_th:
+                    return None
+                raw = latest_th.get("raw_metrics", {})
+                sys_info = raw.get("system", {}) if isinstance(raw, dict) else {}
+                return {
+                    "id": device_id,
+                    "hostname": sys_info.get("hostname", device_id),
+                    "ip_address": "127.0.0.1",
+                    "os": sys_info.get("os_release") or sys_info.get("os") or "Ubuntu Linux",
+                    "kernel": sys_info.get("kernel_version", "Linux"),
+                    "arch": sys_info.get("architecture", "x86_64"),
+                    "status": "offline",
+                    "last_seen": latest_th.get("recorded_at", _utc_now_iso()),
+                    "last_telemetry": raw,
+                    "created_at": latest_th.get("recorded_at", _utc_now_iso()),
+                    "updated_at": latest_th.get("recorded_at", _utc_now_iso()),
+                }
+            dev = dict(row)
 
-    # Evaluate dynamic online/offline status based on last_seen
-    dev = _evaluate_device_liveness(dev, offline_threshold_seconds, db_path=db_path)
-    return dev
+        if not dev.get("last_telemetry"):
+            latest_th = get_latest_telemetry_for_device(dev["id"], db_path=db_path)
+            if latest_th and latest_th.get("raw_metrics"):
+                dev["last_telemetry"] = latest_th["raw_metrics"]
+        elif isinstance(dev.get("last_telemetry"), str):
+            try:
+                dev["last_telemetry"] = json.loads(dev["last_telemetry"])
+            except Exception:
+                pass
+
+        return _evaluate_device_liveness(dev, offline_threshold_seconds, db_path=db_path)
+    except Exception as e:
+        logger.error("Database error retrieving device %s: %s", device_id, e)
+        return None
+
+
+def get_distinct_device_ids_from_telemetry(
+    db_path: Optional[str] = None,
+) -> List[str]:
+    """
+    Retrieve list of unique device IDs recorded in telemetry_history.
+    """
+    query = "SELECT DISTINCT device_id FROM telemetry_history ORDER BY device_id;"
+    try:
+        with get_db_connection(db_path) as conn:
+            rows = conn.execute(query).fetchall()
+            return [str(r[0]) for r in rows if r and r[0]]
+    except Exception as e:
+        logger.error("Database error retrieving distinct device IDs: %s", e)
+        return []
 
 
 def get_all_devices(
@@ -485,6 +531,8 @@ def get_all_devices(
 ) -> List[Dict[str, Any]]:
     """
     Retrieve all registered devices, evaluating liveness status for each.
+    If a device's last_telemetry column is null or empty, populate it from telemetry_history.
+    Ensures any devices with historical telemetry records are included even if not yet in devices table.
     """
     query = """
         SELECT id, hostname, ip_address, os, kernel, arch,
@@ -492,11 +540,37 @@ def get_all_devices(
         FROM devices
         ORDER BY last_seen DESC
     """
-    with get_db_connection(db_path) as conn:
-        rows = conn.execute(query).fetchall()
-        devices = [dict(r) for r in rows]
+    try:
+        with get_db_connection(db_path) as conn:
+            rows = conn.execute(query).fetchall()
+            devices = [dict(r) for r in rows]
 
-    return [_evaluate_device_liveness(d, offline_threshold_seconds, db_path=db_path) for d in devices]
+        existing_ids = {d["id"] for d in devices}
+        th_device_ids = get_distinct_device_ids_from_telemetry(db_path=db_path)
+        for dev_id in th_device_ids:
+            if dev_id not in existing_ids:
+                synth = get_device_by_id(dev_id, offline_threshold_seconds=offline_threshold_seconds, db_path=db_path)
+                if synth:
+                    devices.append(synth)
+                    existing_ids.add(dev_id)
+
+        evaluated = []
+        for d in devices:
+            if not d.get("last_telemetry"):
+                latest_th = get_latest_telemetry_for_device(d["id"], db_path=db_path)
+                if latest_th and latest_th.get("raw_metrics"):
+                    d["last_telemetry"] = latest_th["raw_metrics"]
+            elif isinstance(d.get("last_telemetry"), str):
+                try:
+                    d["last_telemetry"] = json.loads(d["last_telemetry"])
+                except Exception:
+                    pass
+            evaluated.append(_evaluate_device_liveness(d, offline_threshold_seconds, db_path=db_path))
+
+        return evaluated
+    except Exception as e:
+        logger.error("Database error retrieving all devices: %s", e)
+        return []
 
 
 def get_latest_active_device(
@@ -505,9 +579,32 @@ def get_latest_active_device(
 ) -> Optional[Dict[str, Any]]:
     """
     Retrieve the most recently reporting device, updating status if stale.
+    Falls back to latest record in telemetry_history if devices table is empty.
     """
     devices = get_all_devices(offline_threshold_seconds=offline_threshold_seconds, db_path=db_path)
-    return devices[0] if devices else None
+    if devices:
+        return devices[0]
+
+    # Fallback to telemetry_history
+    latest_th = get_latest_telemetry_any_device(db_path=db_path)
+    if latest_th:
+        raw = latest_th.get("raw_metrics", {})
+        sys_info = raw.get("system", {}) if isinstance(raw, dict) else {}
+        return {
+            "id": latest_th["device_id"],
+            "hostname": sys_info.get("hostname", latest_th["device_id"]),
+            "ip_address": "127.0.0.1",
+            "os": sys_info.get("os_release") or sys_info.get("os") or "Ubuntu Linux",
+            "kernel": sys_info.get("kernel_version", "Linux"),
+            "arch": sys_info.get("architecture", "x86_64"),
+            "status": "offline",
+            "last_seen": latest_th.get("recorded_at", _utc_now_iso()),
+            "last_telemetry": raw,
+            "created_at": latest_th.get("recorded_at", _utc_now_iso()),
+            "updated_at": latest_th.get("recorded_at", _utc_now_iso()),
+        }
+
+    return None
 
 
 def update_device_heartbeat(device_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -572,7 +669,8 @@ def insert_telemetry_record(
     Persist a telemetry sample in telemetry_history.
     """
     now = _utc_now_iso()
-    record_id = hashlib.sha256(f"{device_id}_{now}_{uuid.uuid4().hex[:8]}".encode()).hexdigest()[:16]
+    recorded_at = metrics.get("timestamp") or metrics.get("recorded_at") or now
+    record_id = hashlib.sha256(f"{device_id}_{recorded_at}_{uuid.uuid4().hex[:8]}".encode()).hexdigest()[:16]
 
     cpu = metrics.get("cpu", {})
     cpu_pct = cpu.get("usage_percent", 0.0) if isinstance(cpu, dict) else metrics.get("cpu_percent", 0.0)
@@ -596,7 +694,7 @@ def insert_telemetry_record(
         float(cpu_pct or 0.0),
         float(mem_pct or 0.0),
         float(disk_pct or 0.0),
-        now,
+        recorded_at,
         raw_str,
     )
 
@@ -619,7 +717,7 @@ def get_latest_telemetry_for_device(
     db_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Retrieve the most recent telemetry sample for a device.
+    Retrieve the most recent telemetry sample for a device from telemetry_history.
     """
     query = """
         SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at, raw_metrics
@@ -628,14 +726,49 @@ def get_latest_telemetry_for_device(
         ORDER BY recorded_at DESC
         LIMIT 1
     """
-    with get_db_connection(db_path) as conn:
-        row = conn.execute(query, (device_id,)).fetchone()
-        if not row:
-            return None
-        rec = dict(row)
-        try:
-            rec["raw_metrics"] = json.loads(rec["raw_metrics"])
-        except Exception:
-            pass
-        return rec
+    try:
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(query, (device_id,)).fetchone()
+            if not row:
+                return None
+            rec = dict(row)
+            if isinstance(rec.get("raw_metrics"), str):
+                try:
+                    rec["raw_metrics"] = json.loads(rec["raw_metrics"])
+                except Exception:
+                    pass
+            return rec
+    except Exception as e:
+        logger.error("Database error retrieving latest telemetry for device %s: %s", device_id, e)
+        return None
+
+
+def get_latest_telemetry_any_device(
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve the most recent telemetry sample across all devices from telemetry_history.
+    Used when the in-memory cache is empty (e.g. cold start) to reconstruct the active state.
+    """
+    query = """
+        SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at, raw_metrics
+        FROM telemetry_history
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """
+    try:
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(query).fetchone()
+            if not row:
+                return None
+            rec = dict(row)
+            if isinstance(rec.get("raw_metrics"), str):
+                try:
+                    rec["raw_metrics"] = json.loads(rec["raw_metrics"])
+                except Exception:
+                    pass
+            return rec
+    except Exception as e:
+        logger.error("Database error retrieving latest telemetry record: %s", e)
+        return None
 
