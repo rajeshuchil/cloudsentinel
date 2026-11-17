@@ -48,6 +48,7 @@ export interface UbuntuHost {
   diskTotalGb: number;
   diskDevice: string;
   diskMount: string;
+  deviceStatus?: 'online' | 'offline';
   cpuSeries: Record<TimeRange, CpuPoint[]>;
 }
 
@@ -137,6 +138,7 @@ export interface ApiSystemResponse {
   network: {
     interfaces: ApiNetworkInterface[];
   };
+  device_status?: 'online' | 'offline';
 }
 
 export interface ApiSecurityEvent {

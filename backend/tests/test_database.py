@@ -14,6 +14,7 @@ from backend.app.database.repositories import (
     get_security_events,
     insert_security_event,
     insert_security_events,
+    reopen_alert,
     resolve_alert,
 )
 
@@ -183,6 +184,28 @@ class TestDatabaseAndRepositories(unittest.TestCase):
         # Once resolved directly, must not transition to acknowledged
         with self.assertRaises(ValueError):
             acknowledge_alert(alert_id, db_path=self.db_path)
+
+    def test_alert_reopen_lifecycle(self):
+        """Verify an alert can be reopened from acknowledged or resolved state back to active."""
+        alert = create_alert({
+            "title": "CPU Usage Spike",
+            "description": "CPU > 90%",
+            "severity": "critical",
+            "source": "cpu",
+        }, db_path=self.db_path)
+        alert_id = alert["id"]
+        self.assertEqual(alert["status"], "active")
+
+        # Resolve then reopen
+        resolve_alert(alert_id, db_path=self.db_path)
+        reopened = reopen_alert(alert_id, db_path=self.db_path)
+        self.assertIsNotNone(reopened)
+        self.assertEqual(reopened["status"], "active")
+
+        # Idempotent reopen
+        reopened_again = reopen_alert(alert_id, db_path=self.db_path)
+        self.assertEqual(reopened_again["status"], "active")
+
 
     def test_alert_idempotent_transitions(self):
         """Verify redundant transitions return the current record safely."""

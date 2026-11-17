@@ -1,17 +1,19 @@
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from backend.app.api.auth import verify_dashboard_access
 from backend.app.database.repositories import (
     acknowledge_alert as repo_acknowledge,
     create_alert as repo_create,
     get_alert_by_id,
     get_alerts as repo_get_alerts,
+    reopen_alert as repo_reopen,
     resolve_alert as repo_resolve,
 )
 from backend.app.services.alert_engine import evaluate_all_alerts
 
-router = APIRouter(prefix="/api/alerts", tags=["Alerts"])
+router = APIRouter(prefix="/api/alerts", tags=["Alerts"], dependencies=[Depends(verify_dashboard_access)])
 
 
 @router.post("/evaluate", summary="Evaluate Alert Conditions", response_model=Dict[str, Any])
@@ -127,3 +129,19 @@ def resolve_single_alert(alert_id: str) -> Dict[str, Any]:
             detail=f"Alert with ID '{alert_id}' was not found",
         )
     return updated
+
+
+@router.patch("/{alert_id}/reopen", summary="Reopen Alert", response_model=Dict[str, Any])
+def reopen_single_alert(alert_id: str) -> Dict[str, Any]:
+    """
+    Transition an acknowledged or resolved alert back to 'active'.
+    Returns 404 if not found.
+    """
+    updated = repo_reopen(alert_id)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Alert with ID '{alert_id}' was not found",
+        )
+    return updated
+

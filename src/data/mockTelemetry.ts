@@ -82,6 +82,7 @@ export const INITIAL_UBUNTU_HOST: UbuntuHost = {
   diskTotalGb: 0,
   diskDevice: '/',
   diskMount: '/',
+  deviceStatus: 'online',
   cpuSeries: {
     '15m': [],
     '1h': [],

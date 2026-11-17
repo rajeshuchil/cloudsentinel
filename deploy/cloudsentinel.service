@@ -1,0 +1,58 @@
+[Unit]
+Description=CloudSentinel Infrastructure and Security Monitoring Backend
+Documentation=https://github.com/your-username/cloudsentinel
+After=network.target syslog.target
+
+[Service]
+Type=simple
+
+# Run as a dedicated unprivileged system user.
+# The user must belong to the 'adm' group to read /var/log/auth.log:
+#   sudo useradd -r -s /usr/sbin/nologin -d /var/lib/cloudsentinel cloudsentinel
+#   sudo usermod -aG adm cloudsentinel
+User=cloudsentinel
+Group=cloudsentinel
+
+# Standard repository installation directory
+WorkingDirectory=/opt/cloudsentinel
+
+# Automatically manages and persists /var/lib/cloudsentinel with 0750 permissions owned by cloudsentinel
+StateDirectory=cloudsentinel
+StateDirectoryMode=0750
+
+# Configuration: load environment overrides from /etc/cloudsentinel/cloudsentinel.env
+EnvironmentFile=-/etc/cloudsentinel/cloudsentinel.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SQLITE_DB_PATH=/var/lib/cloudsentinel/cloudsentinel.db
+
+# Launch production Uvicorn ASGI server without --reload.
+# Binds to 127.0.0.1:8000 (accessible only locally via reverse proxy).
+# Forwarded headers are accepted from the local reverse proxy (Nginx / Caddy).
+ExecStart=/opt/cloudsentinel/backend/.venv/bin/uvicorn backend.app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1
+
+# Automated restart on abnormal termination
+Restart=on-failure
+RestartSec=5s
+
+# Process and resource limits
+LimitNOFILE=65535
+TimeoutStopSec=15
+
+# Security hardening: restrict privileges and filesystem modifications
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cloudsentinel
+ReadOnlyPaths=/var/log/auth.log
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

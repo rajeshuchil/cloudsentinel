@@ -23,6 +23,7 @@ from backend.app.database.repositories import (
     create_alert,
     get_alert_by_id,
     get_alerts,
+    get_latest_active_device,
     get_open_alert_by_source,
     get_security_events,
     insert_security_events,
@@ -157,12 +158,29 @@ def evaluate_all_alerts(
         mem_val = metrics_override.get("memory_percent")
         disk_val = metrics_override.get("disk_percent")
     else:
-        cpu_metrics = collect_cpu_metrics(interval=0.1)
-        mem_metrics = collect_memory_metrics()
-        disk_metrics = collect_disk_metrics()
-        cpu_val = cpu_metrics.get("usage_percent")
-        mem_val = mem_metrics.get("usage_percent")
-        disk_val = disk_metrics.get("usage_percent")
+        # Check if an active agent device has reported telemetry
+        active_device = get_latest_active_device(offline_threshold_seconds=60, db_path=db_path)
+        cpu_val = mem_val = disk_val = None
+        if active_device and active_device.get("last_telemetry"):
+            try:
+                import json
+                telem = active_device["last_telemetry"]
+                if isinstance(telem, str):
+                    telem = json.loads(telem)
+                cpu_val = telem.get("cpu", {}).get("usage_percent")
+                mem_val = telem.get("memory", {}).get("usage_percent")
+                disk_val = telem.get("disk", {}).get("usage_percent")
+            except Exception:
+                cpu_val = mem_val = disk_val = None
+
+        # Fallback to local collectors if no agent is reporting
+        if cpu_val is None or mem_val is None or disk_val is None:
+            cpu_metrics = collect_cpu_metrics(interval=0.1)
+            mem_metrics = collect_memory_metrics()
+            disk_metrics = collect_disk_metrics()
+            if cpu_val is None: cpu_val = cpu_metrics.get("usage_percent")
+            if mem_val is None: mem_val = mem_metrics.get("usage_percent")
+            if disk_val is None: disk_val = disk_metrics.get("usage_percent")
 
     # 2. Evaluate CPU
     c_alert, u_alert, r_alert = evaluate_metric_threshold(

@@ -1,0 +1,32 @@
+[Unit]
+Description=CloudSentinel Ubuntu Infrastructure & Security Monitoring Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+Group=adm
+WorkingDirectory=%AGENT_DIR%
+EnvironmentFile=%AGENT_DIR%/.env
+ExecStart=%AGENT_DIR%/venv/bin/python3 %AGENT_DIR%/agent.py
+
+# Restart & Failure Policy
+Restart=always
+RestartSec=10s
+
+# Security Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/var/log/auth.log
+ReadWritePaths=%AGENT_DIR%
+
+# Output Logging (accessible via journalctl -u cloudsentinel-agent)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudsentinel-agent
+
+[Install]
+WantedBy=multi-user.target

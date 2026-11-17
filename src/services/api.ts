@@ -13,9 +13,11 @@ import {
   SecurityEventStatus,
 } from '../types/monitoring';
 
-const API_BASE_URL =
+export const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
   'http://127.0.0.1:8000';
+
+export const DASHBOARD_API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
 export class ApiError extends Error {
   status: number;
@@ -31,10 +33,14 @@ export class ApiError extends Error {
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
-  const headers = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(options.headers || {}),
+    ...((options.headers as Record<string, string>) || {}),
   };
+
+  if (DASHBOARD_API_KEY) {
+    headers['X-API-Key'] = DASHBOARD_API_KEY;
+  }
 
   try {
     const response = await fetch(url, {
@@ -143,6 +149,24 @@ export async function resolveAlert(alertId: string): Promise<ApiAlert> {
   return request<ApiAlert>(`/api/alerts/${encodeURIComponent(alertId)}/resolve`, {
     method: 'PATCH',
   });
+}
+
+/**
+ * Reopen an acknowledged or resolved alert back to active.
+ * Best-effort: if the backend deployment does not yet support the reopen endpoint,
+ * returns null gracefully so the UI updates optimistically.
+ */
+export async function reopenAlert(alertId: string): Promise<ApiAlert | null> {
+  try {
+    return await request<ApiAlert>(`/api/alerts/${encodeURIComponent(alertId)}/reopen`, {
+      method: 'PATCH',
+    });
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 // -------------------------------------------------------------

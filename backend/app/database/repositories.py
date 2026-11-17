@@ -1,8 +1,9 @@
 import hashlib
+import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from backend.app.database.connection import get_db_connection
@@ -328,6 +329,35 @@ def resolve_alert(alert_id: str, db_path: Optional[str] = None) -> Optional[Dict
     return get_alert_by_id(alert_id, db_path=db_path)
 
 
+def reopen_alert(alert_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Transition a resolved or acknowledged alert back to 'active'.
+    Rules:
+    - If alert does not exist: returns None.
+    - If alert is already 'active': returns current record (idempotent).
+    """
+    current = get_alert_by_id(alert_id, db_path=db_path)
+    if not current:
+        return None
+
+    if current["status"] == "active":
+        return current
+
+    now = _utc_now_iso()
+    query = """
+        UPDATE alerts
+        SET status = 'active',
+            updated_at = ?
+        WHERE id = ?
+    """
+    with get_db_connection(db_path) as conn:
+        with conn:
+            conn.execute(query, (now, alert_id))
+
+    return get_alert_by_id(alert_id, db_path=db_path)
+
+
+
 def get_open_alert_by_source(source: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Retrieve any currently open (active or acknowledged) alert for a specific source.
@@ -368,3 +398,244 @@ def update_alert_metrics(
             conn.execute(query, (severity, description, now, alert_id))
 
     return get_alert_by_id(alert_id, db_path=db_path)
+
+
+# ==============================================================================
+# Device & Telemetry Repositories (Agent Integration)
+# ==============================================================================
+
+def upsert_device(device_data: Dict[str, Any], db_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Insert or update a registered device record upon telemetry receipt or heartbeat.
+    Updates last_seen and status to 'online'.
+    """
+    now = _utc_now_iso()
+    created_at = device_data.get("created_at") or now
+    last_telemetry = device_data.get("last_telemetry")
+    if isinstance(last_telemetry, dict):
+        last_telemetry_str = json.dumps(last_telemetry)
+    else:
+        last_telemetry_str = last_telemetry
+
+    query = """
+        INSERT INTO devices (
+            id, hostname, ip_address, os, kernel, arch,
+            status, last_seen, last_telemetry, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            hostname = excluded.hostname,
+            ip_address = excluded.ip_address,
+            os = excluded.os,
+            kernel = excluded.kernel,
+            arch = excluded.arch,
+            status = excluded.status,
+            last_seen = excluded.last_seen,
+            last_telemetry = COALESCE(excluded.last_telemetry, devices.last_telemetry),
+            updated_at = excluded.updated_at
+    """
+    params = (
+        device_data["id"],
+        device_data.get("hostname", "unknown"),
+        device_data.get("ip_address", "127.0.0.1"),
+        device_data.get("os", "Linux"),
+        device_data.get("kernel", "unknown"),
+        device_data.get("arch", "x86_64"),
+        device_data.get("status", "online"),
+        now,
+        last_telemetry_str,
+        created_at,
+        now,
+    )
+
+    with get_db_connection(db_path) as conn:
+        with conn:
+            conn.execute(query, params)
+
+    return get_device_by_id(device_data["id"], db_path=db_path)  # type: ignore
+
+
+def get_device_by_id(
+    device_id: str,
+    offline_threshold_seconds: int = 60,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve a device by its identifier, evaluating whether it should be marked offline.
+    """
+    query = """
+        SELECT id, hostname, ip_address, os, kernel, arch,
+               status, last_seen, last_telemetry, created_at, updated_at
+        FROM devices
+        WHERE id = ?
+    """
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(query, (device_id,)).fetchone()
+        if not row:
+            return None
+        dev = dict(row)
+
+    # Evaluate dynamic online/offline status based on last_seen
+    dev = _evaluate_device_liveness(dev, offline_threshold_seconds, db_path=db_path)
+    return dev
+
+
+def get_all_devices(
+    offline_threshold_seconds: int = 60,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve all registered devices, evaluating liveness status for each.
+    """
+    query = """
+        SELECT id, hostname, ip_address, os, kernel, arch,
+               status, last_seen, last_telemetry, created_at, updated_at
+        FROM devices
+        ORDER BY last_seen DESC
+    """
+    with get_db_connection(db_path) as conn:
+        rows = conn.execute(query).fetchall()
+        devices = [dict(r) for r in rows]
+
+    return [_evaluate_device_liveness(d, offline_threshold_seconds, db_path=db_path) for d in devices]
+
+
+def get_latest_active_device(
+    offline_threshold_seconds: int = 60,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve the most recently reporting device, updating status if stale.
+    """
+    devices = get_all_devices(offline_threshold_seconds=offline_threshold_seconds, db_path=db_path)
+    return devices[0] if devices else None
+
+
+def update_device_heartbeat(device_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Update device last_seen timestamp and mark status 'online'.
+    """
+    now = _utc_now_iso()
+    query = """
+        UPDATE devices
+        SET status = 'online',
+            last_seen = ?,
+            updated_at = ?
+        WHERE id = ?
+    """
+    with get_db_connection(db_path) as conn:
+        with conn:
+            cursor = conn.execute(query, (now, now, device_id))
+            if cursor.rowcount == 0:
+                return None
+
+    return get_device_by_id(device_id, db_path=db_path)
+
+
+def _evaluate_device_liveness(
+    device: Dict[str, Any],
+    threshold_seconds: int = 60,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Inspect device last_seen. If older than threshold_seconds, update to 'offline'.
+    """
+    last_seen_str = device.get("last_seen")
+    if not last_seen_str:
+        return device
+
+    try:
+        # Parse ISO timestamp (handling 'Z' suffix)
+        clean_ts = last_seen_str.rstrip("Z")
+        last_seen_dt = datetime.fromisoformat(clean_ts)
+        elapsed = (datetime.utcnow() - last_seen_dt).total_seconds()
+        if elapsed > threshold_seconds and device["status"] == "online":
+            device["status"] = "offline"
+            now = _utc_now_iso()
+            with get_db_connection(db_path) as conn:
+                with conn:
+                    conn.execute(
+                        "UPDATE devices SET status = 'offline', updated_at = ? WHERE id = ?",
+                        (now, device["id"]),
+                    )
+    except Exception as e:
+        logger.warning("Error evaluating device liveness for %s: %s", device.get("id"), e)
+
+    return device
+
+
+def insert_telemetry_record(
+    device_id: str,
+    metrics: Dict[str, Any],
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Persist a telemetry sample in telemetry_history.
+    """
+    now = _utc_now_iso()
+    record_id = hashlib.sha256(f"{device_id}_{now}_{uuid.uuid4().hex[:8]}".encode()).hexdigest()[:16]
+
+    cpu = metrics.get("cpu", {})
+    cpu_pct = cpu.get("usage_percent", 0.0) if isinstance(cpu, dict) else metrics.get("cpu_percent", 0.0)
+
+    mem = metrics.get("memory", {})
+    mem_pct = mem.get("usage_percent", 0.0) if isinstance(mem, dict) else metrics.get("memory_percent", 0.0)
+
+    disk = metrics.get("disk", {})
+    disk_pct = disk.get("usage_percent", 0.0) if isinstance(disk, dict) else metrics.get("disk_percent", 0.0)
+
+    raw_str = json.dumps(metrics) if isinstance(metrics, dict) else str(metrics)
+
+    query = """
+        INSERT INTO telemetry_history (
+            id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at, raw_metrics
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (
+        record_id,
+        device_id,
+        float(cpu_pct or 0.0),
+        float(mem_pct or 0.0),
+        float(disk_pct or 0.0),
+        now,
+        raw_str,
+    )
+
+    with get_db_connection(db_path) as conn:
+        with conn:
+            conn.execute(query, params)
+
+    return {
+        "id": record_id,
+        "device_id": device_id,
+        "cpu_percent": cpu_pct,
+        "memory_percent": mem_pct,
+        "disk_percent": disk_pct,
+        "recorded_at": now,
+    }
+
+
+def get_latest_telemetry_for_device(
+    device_id: str,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve the most recent telemetry sample for a device.
+    """
+    query = """
+        SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at, raw_metrics
+        FROM telemetry_history
+        WHERE device_id = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(query, (device_id,)).fetchone()
+        if not row:
+            return None
+        rec = dict(row)
+        try:
+            rec["raw_metrics"] = json.loads(rec["raw_metrics"])
+        except Exception:
+            pass
+        return rec
+

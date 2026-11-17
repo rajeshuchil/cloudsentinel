@@ -23,6 +23,8 @@ import { SecuritySummarySection } from './components/SecuritySummarySection';
 import { SystemHealthBanner } from './components/SystemHealthBanner';
 import { INITIAL_UBUNTU_HOST, computeSystemHealth } from './data/mockTelemetry';
 import {
+  API_BASE_URL,
+  ApiError,
   acknowledgeAlert,
   evaluateAlerts,
   formatUptime,
@@ -31,6 +33,7 @@ import {
   getSystemMetrics,
   mapApiAlertToAlertItem,
   mapApiSecurityEventToUi,
+  reopenAlert,
   resolveAlert,
   selectPrimaryNetworkInterface,
 } from './services/api';
@@ -76,6 +79,8 @@ export default function App() {
   // Connection state
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [isWakingUp, setIsWakingUp] = useState<boolean>(false);
+  const [isAuthError, setIsAuthError] = useState<boolean>(false);
 
   // Loading / action state
   const [initialLoading, setInitialLoading] = useState<boolean>(true);
@@ -127,6 +132,8 @@ export default function App() {
         prevHost.ipAddress
       );
 
+      const deviceStatus = data.device_status ?? 'online';
+
       // Build a new CPU series point
       const now = new Date();
       const newPoint: CpuPoint = {
@@ -137,13 +144,17 @@ export default function App() {
         systemPct: Number((cpuPct * 0.28).toFixed(1)),
       };
 
-      // Accumulate series per time range, respecting per-bucket maximums
+      // Accumulate series per time range only when host is actively online
       const updatedSeries: Record<TimeRange, CpuPoint[]> = {} as Record<TimeRange, CpuPoint[]>;
       for (const tr of ['15m', '1h', '6h', '24h'] as TimeRange[]) {
         const existing = prevHost.cpuSeries[tr] ?? [];
-        const max = CPU_SERIES_MAX_POINTS[tr];
-        const appended = [...existing, newPoint];
-        updatedSeries[tr] = appended.length > max ? appended.slice(appended.length - max) : appended;
+        if (deviceStatus === 'online') {
+          const max = CPU_SERIES_MAX_POINTS[tr];
+          const appended = [...existing, newPoint];
+          updatedSeries[tr] = appended.length > max ? appended.slice(appended.length - max) : appended;
+        } else {
+          updatedSeries[tr] = existing;
+        }
       }
 
       // Build load average string
@@ -161,6 +172,7 @@ export default function App() {
         uptime: formatUptime(system.uptime_seconds),
         ipAddress,
         networkInterface,
+        deviceStatus,
         cpuPct,
         cpuDelta,
         vCpuTotal: cpu.logical_cores ?? prevHost.vCpuTotal,
@@ -192,13 +204,38 @@ export default function App() {
       if (!mountedRef.current) return;
       setBackendOnline(true);
       setConnectError(null);
+      setIsWakingUp(false);
+      setIsAuthError(false);
       setHost((prev) => applySystemMetrics(data, prev));
       setLastUpdated(formatShortTime(new Date()));
     } catch (err) {
       if (!mountedRef.current) return;
-      const msg = err instanceof Error ? err.message : 'Connection failed';
+      const isRender = API_BASE_URL.includes('onrender.com');
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          setIsAuthError(true);
+          setIsWakingUp(false);
+          setConnectError(err.message || 'Invalid or missing dashboard API authentication key');
+        } else if (err.status === 0 || err.status === 502 || err.status === 503 || err.status === 504) {
+          if (isRender) {
+            setIsWakingUp(true);
+          }
+          setIsAuthError(false);
+          setConnectError(err.message);
+        } else {
+          setIsAuthError(false);
+          setIsWakingUp(false);
+          setConnectError(err.message);
+        }
+      } else {
+        const msg = err instanceof Error ? err.message : 'Connection failed';
+        setIsAuthError(false);
+        if (isRender) {
+          setIsWakingUp(true);
+        }
+        setConnectError(msg);
+      }
       setBackendOnline(false);
-      setConnectError(msg);
     }
   }, [applySystemMetrics]);
 
@@ -270,13 +307,14 @@ export default function App() {
   }, []);
 
   // ----------------------------------------------------------------
-  // Polling: system metrics every 10 s while live
+  // Polling: system metrics every 10 s while live (every 4 s if waking up)
   // ----------------------------------------------------------------
   useEffect(() => {
     if (!isLive) return;
-    const timer = window.setInterval(fetchSystemMetrics, 10_000);
+    const interval = isWakingUp ? 4_000 : 10_000;
+    const timer = window.setInterval(fetchSystemMetrics, interval);
     return () => window.clearInterval(timer);
-  }, [isLive, fetchSystemMetrics]);
+  }, [isLive, isWakingUp, fetchSystemMetrics]);
 
   // ----------------------------------------------------------------
   // Polling: alert evaluation + refresh every 60 s
@@ -312,6 +350,8 @@ export default function App() {
           await acknowledgeAlert(id);
         } else if (status === 'resolved') {
           await resolveAlert(id);
+        } else if (status === 'active') {
+          await reopenAlert(id);
         }
         // Optimistic UI update
         setAlerts((prev) =>
@@ -487,8 +527,24 @@ export default function App() {
         </nav>
 
         <div className="mt-8 border-t border-slate-200 pt-5 px-2.5 dark:border-slate-800">
-          <div className="text-xs font-medium text-slate-400 dark:text-slate-500">
-            Monitored Linux Host
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-medium text-slate-400 dark:text-slate-500">
+              Monitored Linux Host
+            </div>
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wider uppercase ${
+                host.deviceStatus === 'offline'
+                  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400'
+                  : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400'
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  host.deviceStatus === 'offline' ? 'bg-rose-500' : 'bg-emerald-500'
+                }`}
+              />
+              {host.deviceStatus === 'offline' ? 'OFFLINE' : 'ONLINE'}
+            </span>
           </div>
           <dl className="mt-3 space-y-2 text-xs">
             <div>
@@ -527,20 +583,36 @@ export default function App() {
         {/* Backend connection status indicator */}
         <div className="flex items-center gap-1.5">
           {backendOnline === null ? (
-            <span className="inline-block h-2 w-2 rounded-full bg-slate-300 dark:bg-slate-600" />
+            <span className="inline-block h-2 w-2 rounded-full bg-slate-300 dark:bg-slate-600 animate-pulse" />
           ) : backendOnline ? (
             <Wifi className="h-3.5 w-3.5 text-emerald-500" />
+          ) : isWakingUp ? (
+            <RefreshCw className="h-3.5 w-3.5 text-amber-500 animate-spin" />
+          ) : isAuthError ? (
+            <ShieldAlert className="h-3.5 w-3.5 text-red-500" />
           ) : (
             <WifiOff className="h-3.5 w-3.5 text-red-500" />
           )}
           <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-            {backendOnline === null ? 'CONNECTING…' : backendOnline ? 'LIVE HOST DATA' : 'BACKEND OFFLINE'}
+            {backendOnline === null
+              ? 'CONNECTING…'
+              : backendOnline
+              ? 'LIVE HOST DATA'
+              : isWakingUp
+              ? 'WAKING UP (RENDER)…'
+              : isAuthError
+              ? 'AUTH ERROR (401)'
+              : 'BACKEND OFFLINE'}
           </span>
         </div>
-        <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+        <div className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400" title={API_BASE_URL}>
           {backendOnline
             ? 'Real psutil metrics · auth.log events'
-            : 'FastAPI backend · port 8000'}
+            : isWakingUp
+            ? 'Cold start in progress (~30-50s)'
+            : isAuthError
+            ? 'Invalid DASHBOARD_API_KEY'
+            : API_BASE_URL}
         </div>
       </div>
     </div>
@@ -630,8 +702,56 @@ export default function App() {
           {/* Main Content Viewport */}
           <main className="mx-auto w-full max-w-6xl flex-1 space-y-5 px-4 py-6 sm:px-6">
 
+            {/* Authentication Failure Banner */}
+            {backendOnline === false && isAuthError && (
+              <div
+                role="alert"
+                aria-label="Authentication error"
+                className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50/70 px-4 py-2.5 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
+              >
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                <div className="flex-1 min-w-0">
+                  <strong className="font-semibold">Authentication Failed (HTTP 401) — </strong>
+                  The configured <code className="font-mono">VITE_API_KEY</code> was rejected by the backend at{' '}
+                  <code className="font-mono">{API_BASE_URL}</code>. Ensure the key matches{' '}
+                  <code className="font-mono">DASHBOARD_API_KEY</code> configured in your Render service settings.
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualRefresh}
+                  className="shrink-0 rounded border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-red-950 dark:text-red-300 dark:hover:bg-red-900 cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* Render Free-Tier Waking Up Banner */}
+            {backendOnline === false && !isAuthError && isWakingUp && (
+              <div
+                role="status"
+                aria-label="Backend waking up"
+                className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 px-4 py-2.5 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300"
+              >
+                <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400 animate-spin" aria-hidden="true" />
+                <div className="flex-1 min-w-0">
+                  <strong className="font-semibold">Waking Up Render Backend — </strong>
+                  Free-tier web services on Render spin down after 15 minutes of inactivity. Initial cold-start takes approximately 30–50 seconds.
+                  Automatically polling <code className="font-mono">{API_BASE_URL}</code>…
+                </div>
+                <button
+                  type="button"
+                  onClick={handleManualRefresh}
+                  disabled={isRefreshing}
+                  className="shrink-0 rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-800 hover:bg-amber-50 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200 dark:hover:bg-amber-900 cursor-pointer disabled:opacity-50"
+                >
+                  {isRefreshing ? 'Checking…' : 'Check Now'}
+                </button>
+              </div>
+            )}
+
             {/* Backend Offline Banner */}
-            {backendOnline === false && (
+            {backendOnline === false && !isAuthError && !isWakingUp && (
               <div
                 role="alert"
                 aria-label="Backend connection error"
@@ -640,9 +760,17 @@ export default function App() {
                 <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <div className="flex-1 min-w-0">
                   <strong className="font-semibold">Backend Offline — </strong>
-                  {connectError || 'Cannot connect to FastAPI backend at port 8000.'}
-                  {' '}Ensure the backend is running:{' '}
-                  <code className="font-mono">uvicorn backend.app.main:app --reload --port 8000</code>
+                  {connectError || `Cannot connect to CloudSentinel backend at ${API_BASE_URL}.`}{' '}
+                  {API_BASE_URL.includes('127.0.0.1') || API_BASE_URL.includes('localhost') ? (
+                    <>
+                      Ensure the local backend is running:{' '}
+                      <code className="font-mono">uvicorn backend.app.main:app --reload --port 8000</code>
+                    </>
+                  ) : (
+                    <>
+                      Verify that the backend service at <code className="font-mono">{API_BASE_URL}</code> is deployed and healthy.
+                    </>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -671,15 +799,24 @@ export default function App() {
               <div
                 role="note"
                 aria-label="Live data notice"
-                className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-2.5 text-xs text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-300"
+                className={`flex items-start gap-2.5 rounded-lg border px-4 py-2.5 text-xs ${
+                  host.deviceStatus === 'offline'
+                    ? 'border-amber-200 bg-amber-50/60 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300'
+                    : 'border-emerald-200 bg-emerald-50/60 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-300'
+                }`}
               >
-                <Wifi className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                {host.deviceStatus === 'offline' ? (
+                  <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
+                ) : (
+                  <Wifi className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" aria-hidden="true" />
+                )}
                 <p>
-                  <strong className="font-mono font-semibold">LIVE HOST TELEMETRY:</strong>{' '}
-                  Real system metrics collected via psutil from{' '}
-                  <span className="font-mono">{host.hostname}</span> ({host.os}).
-                  Security events sourced from{' '}
-                  <span className="font-mono">/var/log/auth.log</span> · alerts persisted in SQLite.
+                  <strong className="font-mono font-semibold">
+                    {host.deviceStatus === 'offline' ? 'DEVICE OFFLINE:' : 'LIVE HOST TELEMETRY:'}
+                  </strong>{' '}
+                  {host.deviceStatus === 'offline'
+                    ? `Ubuntu host ${host.hostname} has not reported within 60s. Displaying preserved telemetry.`
+                    : `Real system metrics collected via psutil from ${host.hostname} (${host.os}). Security events sourced from /var/log/auth.log · alerts persisted in database.`}
                 </p>
               </div>
             )}
@@ -705,6 +842,23 @@ export default function App() {
                   </span>
                   <span className="font-mono tabular-nums">
                     {host.networkInterface} {host.ipAddress}
+                  </span>
+                  <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
+                    ·
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                      host.deviceStatus === 'offline'
+                        ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400'
+                        : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400'
+                    }`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        host.deviceStatus === 'offline' ? 'bg-rose-500' : 'bg-emerald-500'
+                      }`}
+                    />
+                    {host.deviceStatus === 'offline' ? 'OFFLINE' : 'ONLINE'}
                   </span>
                 </div>
               </div>

@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from backend.app.api.auth import verify_dashboard_access
 from backend.app.collectors.log_collector import read_recent_log_lines
 from backend.app.database.repositories import (
     count_security_events,
@@ -10,7 +11,7 @@ from backend.app.database.repositories import (
 )
 from backend.app.security.ssh_analyzer import analyze_log_lines
 
-router = APIRouter(prefix="/api/security", tags=["Security"])
+router = APIRouter(prefix="/api/security", tags=["Security"], dependencies=[Depends(verify_dashboard_access)])
 
 
 @router.get("/events", summary="Get Security Events", response_model=Dict[str, Any])
