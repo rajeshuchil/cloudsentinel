@@ -6,7 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from backend.app.api.auth import verify_agent_token, verify_dashboard_access
+from backend.app.api.auth import check_dashboard_access, verify_agent_token, verify_dashboard_access
+from backend.app.security.rate_limiter import check_rate_limit, mask_ip_address
 from backend.app.database.repositories import (
     get_all_devices,
     get_device_by_id,
@@ -245,20 +246,37 @@ async def agent_heartbeat(
 
 @router.get("/devices", summary="List Registered Devices")
 def list_devices(
-    auth: bool = Depends(verify_dashboard_access),
+    request: Request = None,
+    auth: Optional[bool] = None,
+    is_admin: bool = Depends(check_dashboard_access),
 ) -> Dict[str, Any]:
     """
     Return all registered devices and their current online/offline status.
-    Protected by DASHBOARD_API_KEY if configured.
+    Publicly accessible; masks IP addresses when unauthenticated.
+    Rate limited for public requests.
     """
+    effective_admin = is_admin or bool(auth)
+    if request:
+        check_rate_limit(request, is_admin=effective_admin)
+
     try:
         devices = get_all_devices(offline_threshold_seconds=60)
         cleaned = []
         for d in devices:
             d_copy = dict(d)
+            if not effective_admin:
+                d_copy["ip_address"] = mask_ip_address(d_copy.get("ip_address"))
+
             if isinstance(d_copy.get("last_telemetry"), str):
                 try:
-                    d_copy["last_telemetry"] = json.loads(d_copy["last_telemetry"])
+                    telem = json.loads(d_copy["last_telemetry"])
+                    if not effective_admin and "network" in telem and "interfaces" in telem["network"]:
+                        for iface in telem["network"]["interfaces"]:
+                            if "addresses" in iface:
+                                for addr in iface["addresses"]:
+                                    if "address" in addr:
+                                        addr["address"] = mask_ip_address(addr.get("address"))
+                    d_copy["last_telemetry"] = telem
                 except Exception:
                     pass
             cleaned.append(d_copy)
@@ -281,12 +299,19 @@ def list_devices(
 @router.get("/devices/{device_id}", summary="Get Device Status")
 def get_device(
     device_id: str,
-    auth: bool = Depends(verify_dashboard_access),
+    request: Request = None,
+    auth: Optional[bool] = None,
+    is_admin: bool = Depends(check_dashboard_access),
 ) -> Dict[str, Any]:
     """
     Retrieve single device by ID with liveness evaluation.
-    Protected by DASHBOARD_API_KEY if configured.
+    Publicly accessible; masks IP addresses when unauthenticated.
+    Rate limited for public requests.
     """
+    effective_admin = is_admin or bool(auth)
+    if request:
+        check_rate_limit(request, is_admin=effective_admin)
+
     try:
         dev = get_device_by_id(device_id, offline_threshold_seconds=60)
         if not dev:
@@ -294,14 +319,25 @@ def get_device(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Device {device_id} not found",
             )
-        if isinstance(dev.get("last_telemetry"), str):
+        dev_copy = dict(dev)
+        if not effective_admin:
+            dev_copy["ip_address"] = mask_ip_address(dev_copy.get("ip_address"))
+
+        if isinstance(dev_copy.get("last_telemetry"), str):
             try:
-                dev["last_telemetry"] = json.loads(dev["last_telemetry"])
+                telem = json.loads(dev_copy["last_telemetry"])
+                if not effective_admin and "network" in telem and "interfaces" in telem["network"]:
+                    for iface in telem["network"]["interfaces"]:
+                        if "addresses" in iface:
+                            for addr in iface["addresses"]:
+                                if "address" in addr:
+                                    addr["address"] = mask_ip_address(addr.get("address"))
+                dev_copy["last_telemetry"] = telem
             except Exception:
                 pass
         return {
             "status": "success",
-            "device": dev,
+            "device": dev_copy,
         }
     except HTTPException:
         raise
@@ -311,3 +347,4 @@ def get_device(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error retrieving device {device_id}: {str(e)}",
         )
+

@@ -32,13 +32,18 @@ app = FastAPI(
 
 # Parse allowed CORS origins from environment or use local development defaults.
 # Wildcard origins are disallowed to prevent cross-origin abuse.
-raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173")
+raw_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://cloudsentinel.ai.studio,https://cloudsentinel.aistudio.google.com",
+)
 if raw_origins.strip() == "*":
     allowed_origins = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://cloudsentinel.ai.studio",
+        "https://cloudsentinel.aistudio.google.com",
     ]
 else:
     allowed_origins: List[str] = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]

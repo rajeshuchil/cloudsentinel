@@ -2,11 +2,11 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
-from fastapi import APIRouter, Depends, Query
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Depends, Query, Request
 
 from backend.app.api.agent import get_cached_telemetry, set_cached_telemetry
-from backend.app.api.auth import verify_dashboard_access
+from backend.app.api.auth import check_dashboard_access
 from backend.app.collectors.system_collector import get_all_system_metrics
 from backend.app.database.connection import get_db_type
 from backend.app.database.repositories import (
@@ -14,7 +14,9 @@ from backend.app.database.repositories import (
     get_latest_active_device,
     get_latest_telemetry_any_device,
     get_latest_telemetry_for_device,
+    get_telemetry_history_samples,
 )
+from backend.app.security.rate_limiter import check_rate_limit, mask_ip_address
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ def _format_telemetry_payload(
     device_id: str,
     recorded_at: str,
     device_status: str,
+    mask_ips: bool = False,
 ) -> Dict[str, Any]:
     """Ensure consistent telemetry structure with preserved device ID and timestamp."""
     system_info = raw_metrics.get("system", {})
@@ -46,6 +49,17 @@ def _format_telemetry_payload(
     mem_info = raw_metrics.get("memory", {})
     disk_info = raw_metrics.get("disk", {})
     net_info = raw_metrics.get("network", {"interfaces": []})
+
+    interfaces = []
+    if isinstance(net_info, dict) and "interfaces" in net_info:
+        for iface in net_info["interfaces"]:
+            iface_dict = dict(iface)
+            if mask_ips and "addresses" in iface_dict:
+                iface_dict["addresses"] = [
+                    {**addr, "address": mask_ip_address(addr.get("address"))}
+                    for addr in iface_dict["addresses"]
+                ]
+            interfaces.append(iface_dict)
 
     return {
         "device_id": device_id,
@@ -78,24 +92,26 @@ def _format_telemetry_payload(
             "free_bytes": disk_info.get("free_bytes", 0),
             "usage_percent": disk_info.get("usage_percent", 0.0),
         },
-        "network": net_info if isinstance(net_info, dict) else {"interfaces": []},
+        "network": {"interfaces": interfaces},
     }
 
 
 @router.get("", summary="Get System Metrics", response_model=Dict[str, Any])
 def read_system_metrics(
+    request: Request = None,
     device_id: Optional[str] = Query(default=None, description="Optional target device ID to retrieve metrics for"),
-    auth: bool = Depends(verify_dashboard_access),
+    auth: Optional[bool] = None,
+    is_admin: bool = Depends(check_dashboard_access),
 ) -> Dict[str, Any]:
     """
     Retrieve real-time or latest persisted Linux host telemetry.
-    1. Checks in-memory cache to serve live telemetry with zero database compute.
-    2. If cache is empty or for a specific device, retrieves latest persisted telemetry
-       from Neon PostgreSQL (telemetry_history and devices tables).
-    3. Preserves actual recorded timestamp and device ID.
-    4. Evaluates online/offline status dynamically without marking historical data as online.
-    5. In production, never substitutes Render container metrics for agent telemetry.
+    Publicly accessible without API key for live monitoring dashboard.
+    Rate limited for anonymous requests; masks sensitive IP addresses when unauthenticated.
     """
+    effective_admin = is_admin or bool(auth)
+    if request:
+        check_rate_limit(request, is_admin=effective_admin)
+
     try:
         # Sanitize device_id if called directly without query parameter
         if not isinstance(device_id, str):
@@ -109,6 +125,19 @@ def read_system_metrics(
             data_copy = dict(data)
             # Evaluate live status: offline after 60s silence
             data_copy["device_status"] = "offline" if elapsed > 60.0 else "online"
+
+            if not effective_admin and "network" in data_copy and "interfaces" in data_copy["network"]:
+                sanitized_ifaces = []
+                for iface in data_copy["network"]["interfaces"]:
+                    iface_dict = dict(iface)
+                    if "addresses" in iface_dict:
+                        iface_dict["addresses"] = [
+                            {**addr, "address": mask_ip_address(addr.get("address"))}
+                            for addr in iface_dict["addresses"]
+                        ]
+                    sanitized_ifaces.append(iface_dict)
+                data_copy["network"] = {"interfaces": sanitized_ifaces}
+
             return data_copy
 
         # 2. Check telemetry_history for selected device or most recently recorded device
@@ -132,11 +161,21 @@ def read_system_metrics(
                 device_id=target_id,
                 recorded_at=recorded_at,
                 device_status=status,
+                mask_ips=False,
             )
 
-            # Update cache if device is currently online
+            # Update cache with unmasked data if device is currently online
             if status == "online":
                 set_cached_telemetry(payload)
+
+            if not effective_admin:
+                return _format_telemetry_payload(
+                    raw_metrics=raw,
+                    device_id=target_id,
+                    recorded_at=recorded_at,
+                    device_status=status,
+                    mask_ips=True,
+                )
 
             return payload
 
@@ -154,6 +193,18 @@ def read_system_metrics(
             telem["device_status"] = active_device.get("status", "offline")
             telem["device_id"] = active_device.get("id")
             telem["timestamp"] = active_device.get("last_seen") or telem.get("timestamp")
+
+            if not effective_admin and "network" in telem and "interfaces" in telem["network"]:
+                sanitized_ifaces = []
+                for iface in telem["network"]["interfaces"]:
+                    iface_dict = dict(iface)
+                    if "addresses" in iface_dict:
+                        iface_dict["addresses"] = [
+                            {**addr, "address": mask_ip_address(addr.get("address"))}
+                            for addr in iface_dict["addresses"]
+                        ]
+                    sanitized_ifaces.append(iface_dict)
+                telem["network"] = {"interfaces": sanitized_ifaces}
 
             if telem["device_status"] == "online":
                 set_cached_telemetry(telem)
@@ -200,6 +251,18 @@ def read_system_metrics(
         # 5. Local development fallback (SQLite): collect workstation metrics via psutil
         metrics = get_all_system_metrics()
         metrics["device_status"] = "online"
+        metrics["device_id"] = device_id or "dev-workstation"
+        if not effective_admin and "network" in metrics and "interfaces" in metrics["network"]:
+            sanitized_ifaces = []
+            for iface in metrics["network"]["interfaces"]:
+                iface_dict = dict(iface)
+                if "addresses" in iface_dict:
+                    iface_dict["addresses"] = [
+                        {**addr, "address": mask_ip_address(addr.get("address"))}
+                        for addr in iface_dict["addresses"]
+                    ]
+                sanitized_ifaces.append(iface_dict)
+            metrics["network"] = {"interfaces": sanitized_ifaces}
         return metrics
 
     except Exception as e:
@@ -223,3 +286,33 @@ def read_system_metrics(
             "device_status": "offline",
             "error": str(e),
         }
+
+
+@router.get("/history", summary="Get System Telemetry History", response_model=Dict[str, Any])
+def read_system_history(
+    request: Request = None,
+    device_id: Optional[str] = Query(default=None, description="Optional target device ID to retrieve history for"),
+    limit: int = Query(default=60, ge=1, le=200, description="Number of historical samples to retrieve"),
+    auth: Optional[bool] = None,
+    is_admin: bool = Depends(check_dashboard_access),
+) -> Dict[str, Any]:
+    """
+    Retrieve historical telemetry records sorted chronologically ascending.
+    Allows frontend charts to render real historical samples from Neon on load.
+    Rate limited for public requests.
+    """
+    effective_admin = is_admin or bool(auth)
+    if request:
+        check_rate_limit(request, is_admin=effective_admin)
+
+    if not isinstance(limit, int):
+        limit = 60
+    if not isinstance(device_id, str):
+        device_id = None
+
+    samples = get_telemetry_history_samples(device_id=device_id, limit=limit)
+    return {
+        "status": "success",
+        "total": len(samples),
+        "samples": samples,
+    }

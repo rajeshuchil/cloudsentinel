@@ -25,7 +25,7 @@ def verify_agent_token(
     expected_key = get_agent_api_key()
 
     token = x_agent_token
-    if not token and authorization:
+    if not token and authorization and isinstance(authorization, str):
         parts = authorization.split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             token = parts[1]
@@ -56,7 +56,7 @@ def verify_dashboard_access(
         return True
 
     token = x_api_key
-    if not token and authorization:
+    if not token and authorization and isinstance(authorization, str):
         parts = authorization.split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             token = parts[1]
@@ -69,3 +69,28 @@ def verify_dashboard_access(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return True
+
+
+def check_dashboard_access(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None),
+) -> bool:
+    """
+    Check whether dashboard access key is valid without throwing HTTPException.
+    Returns True if authenticated as administrator, False if anonymous or invalid.
+    Allows endpoints to serve public/sanitized metrics to anonymous visitors while
+    providing administrative visibility to authenticated users.
+    """
+    required_key = os.getenv("DASHBOARD_API_KEY")
+    if not required_key:
+        # Development mode without key configured -> full access
+        return True
+
+    token = x_api_key
+    if not token and authorization and isinstance(authorization, str):
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+
+    return bool(token and token == required_key)
+

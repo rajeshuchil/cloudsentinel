@@ -772,3 +772,49 @@ def get_latest_telemetry_any_device(
         logger.error("Database error retrieving latest telemetry record: %s", e)
         return None
 
+
+def get_telemetry_history_samples(
+    device_id: Optional[str] = None,
+    limit: int = 60,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve historical telemetry records sorted chronologically ascending.
+    Used for rendering real historical performance charts on initial page load.
+    """
+    clamped_limit = max(1, min(limit, 200))
+    if device_id:
+        query = """
+            SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at
+            FROM (
+                SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at
+                FROM telemetry_history
+                WHERE device_id = ?
+                ORDER BY recorded_at DESC
+                LIMIT ?
+            ) sub
+            ORDER BY recorded_at ASC
+        """
+        params: Any = (device_id, clamped_limit)
+    else:
+        query = """
+            SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at
+            FROM (
+                SELECT id, device_id, cpu_percent, memory_percent, disk_percent, recorded_at
+                FROM telemetry_history
+                ORDER BY recorded_at DESC
+                LIMIT ?
+            ) sub
+            ORDER BY recorded_at ASC
+        """
+        params = (clamped_limit,)
+
+    try:
+        with get_db_connection(db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("Database error retrieving telemetry history samples: %s", e)
+        return []
+
+

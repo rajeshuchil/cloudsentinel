@@ -178,6 +178,31 @@ export async function getSystemMetrics(deviceId?: string): Promise<ApiSystemResp
   return request<ApiSystemResponse>(`/api/system${query}`);
 }
 
+export interface ApiTelemetrySample {
+  id: string;
+  device_id: string;
+  cpu_percent: number;
+  memory_percent: number;
+  disk_percent: number;
+  recorded_at: string;
+}
+
+export interface ApiTelemetryHistoryResponse {
+  status: string;
+  total: number;
+  samples: ApiTelemetrySample[];
+}
+
+/**
+ * Retrieve chronological historical telemetry samples to populate performance charts.
+ */
+export async function getSystemHistory(deviceId?: string, limit = 60): Promise<ApiTelemetryHistoryResponse> {
+  const params = new URLSearchParams();
+  if (deviceId) params.set('device_id', deviceId);
+  params.set('limit', String(limit));
+  return request<ApiTelemetryHistoryResponse>(`/api/system/history?${params.toString()}`);
+}
+
 /**
  * Retrieve list of registered devices and their latest statuses.
  */

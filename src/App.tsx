@@ -37,6 +37,7 @@ import {
   getDashboardApiKey,
   getDevices,
   getSecurityEvents,
+  getSystemHistory,
   getSystemMetrics,
   mapApiAlertToAlertItem,
   mapApiSecurityEventToUi,
@@ -73,16 +74,13 @@ const CPU_SERIES_MAX_POINTS: Record<TimeRange, number> = {
   '24h': 96,
 };
 
-interface AppProps {
-  /** Optional callback to exit admin mode and return to public Demo Mode */
-  onExitAdmin?: () => void;
-}
-
-export default function App({ onExitAdmin }: AppProps = {}) {
+export default function App() {
   const [host, setHost] = useState<UbuntuHost>(INITIAL_UBUNTU_HOST);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
   const [selectedSecurityEventId, setSelectedSecurityEventId] = useState<string | null>(null);
+  const [securityAuthRequired, setSecurityAuthRequired] = useState<boolean>(false);
+  const [alertsAuthRequired, setAlertsAuthRequired] = useState<boolean>(false);
   const [activeView, setActiveView] = useState<DashboardView>('overview');
   const [timeRange, setTimeRange] = useState<TimeRange>('15m');
   const [darkMode, setDarkMode] = useState<boolean>(false);
@@ -304,6 +302,44 @@ export default function App({ onExitAdmin }: AppProps = {}) {
   }, [selectedDeviceId, applySystemMetrics]);
 
   // ----------------------------------------------------------------
+  // ----------------------------------------------------------------
+  // Fetch: historical telemetry samples from Neon to seed charts
+  // ----------------------------------------------------------------
+  const fetchSystemHistory = useCallback(async () => {
+    try {
+      const data = await getSystemHistory(selectedDeviceId || undefined, 60);
+      if (!mountedRef.current || !data.samples || data.samples.length === 0) return;
+
+      const points: CpuPoint[] = data.samples.map((s) => {
+        const d = new Date(s.recorded_at);
+        const hh = isNaN(d.getTime()) ? '--' : String(d.getHours()).padStart(2, '0');
+        const mm = isNaN(d.getTime()) ? '--' : String(d.getMinutes()).padStart(2, '0');
+        const ss = isNaN(d.getTime()) ? '--' : String(d.getSeconds()).padStart(2, '0');
+        const usage = s.cpu_percent;
+        return {
+          timestamp: `${hh}:${mm}:${ss}`,
+          label: `${hh}:${mm}`,
+          usage,
+          userPct: Number((usage * 0.73).toFixed(1)),
+          systemPct: Number((usage * 0.27).toFixed(1)),
+        };
+      });
+
+      setHost((prev) => ({
+        ...prev,
+        cpuSeries: {
+          '15m': points.slice(-18),
+          '1h': points,
+          '6h': points,
+          '24h': points,
+        },
+      }));
+    } catch (err) {
+      console.warn('[CloudSentinel] Could not fetch telemetry history:', err);
+    }
+  }, [selectedDeviceId]);
+
+  // ----------------------------------------------------------------
   // Fetch: security events
   // ----------------------------------------------------------------
   const fetchSecurityEvents = useCallback(async () => {
@@ -312,12 +348,16 @@ export default function App({ onExitAdmin }: AppProps = {}) {
       if (!mountedRef.current) return;
       const mapped = data.events.map(mapApiSecurityEventToUi);
       setSecurityEvents(mapped);
+      setSecurityAuthRequired(false);
       if (mapped.length > 0 && selectedSecurityEventId === null) {
         setSelectedSecurityEventId(mapped[0].id);
       }
     } catch (err) {
-      console.error('[CloudSentinel] Error fetching security events:', err);
-      // Security events are non-critical — keep existing state
+      if (err instanceof ApiError && err.status === 401) {
+        setSecurityAuthRequired(true);
+      } else {
+        console.error('[CloudSentinel] Error fetching security events:', err);
+      }
     }
   }, [selectedSecurityEventId]);
 
@@ -329,9 +369,13 @@ export default function App({ onExitAdmin }: AppProps = {}) {
       const data = await getAlerts({ limit: 100 });
       if (!mountedRef.current) return;
       setAlerts(data.alerts.map(mapApiAlertToAlertItem));
+      setAlertsAuthRequired(false);
     } catch (err) {
-      console.error('[CloudSentinel] Error fetching alerts:', err);
-      // Keep existing alerts
+      if (err instanceof ApiError && err.status === 401) {
+        setAlertsAuthRequired(true);
+      } else {
+        console.error('[CloudSentinel] Error fetching alerts:', err);
+      }
     }
   }, []);
 
@@ -345,7 +389,7 @@ export default function App({ onExitAdmin }: AppProps = {}) {
       await evaluateAlerts();
       await Promise.all([fetchAlerts(), fetchSecurityEvents()]);
     } catch {
-      // Evaluation is best-effort
+      // Evaluation is best-effort (requires admin key if configured)
     } finally {
       if (mountedRef.current) setIsEvaluating(false);
     }
@@ -364,20 +408,27 @@ export default function App({ onExitAdmin }: AppProps = {}) {
     }
     setShowAuthModal(false);
     setIsAuthError(false);
+    setSecurityAuthRequired(false);
+    setAlertsAuthRequired(false);
     // Refresh immediately with the newly stored key
     setTimeout(() => {
       fetchDevicesList();
       fetchSystemMetrics();
+      fetchSystemHistory();
       fetchAlerts();
       fetchSecurityEvents();
     }, 50);
-  }, [authKeyInput, fetchDevicesList, fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
+  }, [authKeyInput, fetchDevicesList, fetchSystemMetrics, fetchSystemHistory, fetchAlerts, fetchSecurityEvents]);
 
   const handleClearAuthKey = useCallback(() => {
     setDashboardApiKey(null);
     setAuthKeyInput('');
     setHasStoredKey(false);
     setShowAuthModal(false);
+    setSecurityEvents([]);
+    setAlerts([]);
+    setSecurityAuthRequired(true);
+    setAlertsAuthRequired(true);
   }, []);
 
   // ----------------------------------------------------------------
@@ -389,6 +440,7 @@ export default function App({ onExitAdmin }: AppProps = {}) {
       await Promise.all([
         fetchDevicesList(),
         fetchSystemMetrics(),
+        fetchSystemHistory(),
         fetchSecurityEvents(),
         fetchAlerts(),
       ]);
@@ -432,6 +484,7 @@ export default function App({ onExitAdmin }: AppProps = {}) {
       await Promise.allSettled([
         fetchDevicesList(),
         fetchSystemMetrics(),
+        fetchSystemHistory(),
         fetchAlerts(),
         fetchSecurityEvents(),
       ]);
@@ -443,7 +496,7 @@ export default function App({ onExitAdmin }: AppProps = {}) {
         setIsRefreshing(false);
       }
     }
-  }, [fetchDevicesList, fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
+  }, [fetchDevicesList, fetchSystemMetrics, fetchSystemHistory, fetchAlerts, fetchSecurityEvents]);
 
   // ----------------------------------------------------------------
   // Alert status actions (hit the backend PATCH endpoints)
@@ -858,20 +911,6 @@ export default function App({ onExitAdmin }: AppProps = {}) {
                 />
                 <span>Refresh Metrics</span>
               </button>
-
-              {/* Back to Demo — only shown when launched from Root.tsx */}
-              {onExitAdmin && (
-                <button
-                  type="button"
-                  onClick={onExitAdmin}
-                  title="Return to Public Demo Mode"
-                  aria-label="Return to Public Demo Mode"
-                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 hover:text-blue-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-300 dark:hover:bg-blue-900/50 whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <FlaskConical className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <span className="hidden sm:inline">Demo Mode</span>
-                </button>
-              )}
             </div>
           </header>
 
@@ -1173,37 +1212,98 @@ export default function App({ onExitAdmin }: AppProps = {}) {
             )}
 
             {activeView === 'security' && (
-              <SecurityEventsView
-                events={securityEvents}
-                selectedEventId={selectedSecurityEventId}
-                onSelectEvent={setSelectedSecurityEventId}
-                onUpdateEventStatus={handleUpdateSecurityStatus}
-                onResetEvents={handleRefreshSecurityEvents}
-              />
+              securityAuthRequired ? (
+                <div className="rounded-lg border border-slate-200 bg-white p-8 text-center dark:border-slate-800 dark:bg-slate-900">
+                  <ShieldAlert className="mx-auto h-10 w-10 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                  <h3 className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">
+                    Administrator Authentication Required
+                  </h3>
+                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                    Security events and SSH authentication logs from <code className="font-mono text-xs">{host.hostname}</code> are protected and require the dashboard API key.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthKeyInput(getDashboardApiKey() || '');
+                      setShowAuthModal(true);
+                    }}
+                    className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 dark:border-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200 cursor-pointer"
+                  >
+                    <Key className="h-3.5 w-3.5" aria-hidden="true" />
+                    Enter API Key
+                  </button>
+                </div>
+              ) : (
+                <SecurityEventsView
+                  events={securityEvents}
+                  selectedEventId={selectedSecurityEventId}
+                  onSelectEvent={setSelectedSecurityEventId}
+                  onUpdateEventStatus={handleUpdateSecurityStatus}
+                  onResetEvents={handleRefreshSecurityEvents}
+                />
+              )
             )}
 
             {activeView === 'alerts' && (
-              <>
-                <SystemHealthBanner
-                  status={health.status}
-                  label={health.label}
-                  summary={health.summary}
-                  hostname={host.hostname}
-                  os={host.os}
-                  uptime={host.uptime}
-                  openAlertsCount={openAlertsCount}
-                  openSecurityCount={openSecurityCount}
-                  lastUpdated={lastUpdated}
-                  onViewAlerts={() => setActiveView('alerts')}
-                  onViewSecurity={() => setActiveView('security')}
-                />
-                <AlertsTable
-                  alerts={alerts}
-                  onUpdateStatus={handleUpdateAlertStatus}
-                  onResetAlerts={handleRefreshAlerts}
-                  title="Operational Alert Log"
-                />
-              </>
+              alertsAuthRequired ? (
+                <>
+                  <SystemHealthBanner
+                    status={health.status}
+                    label={health.label}
+                    summary={health.summary}
+                    hostname={host.hostname}
+                    os={host.os}
+                    uptime={host.uptime}
+                    openAlertsCount={openAlertsCount}
+                    openSecurityCount={openSecurityCount}
+                    lastUpdated={lastUpdated}
+                    onViewAlerts={() => setActiveView('alerts')}
+                    onViewSecurity={() => setActiveView('security')}
+                  />
+                  <div className="rounded-lg border border-slate-200 bg-white p-8 text-center dark:border-slate-800 dark:bg-slate-900">
+                    <Bell className="mx-auto h-10 w-10 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                    <h3 className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">
+                      Operational Alerts Management Protected
+                    </h3>
+                    <p className="mt-2 text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                      Viewing and managing detailed operational alerts for <code className="font-mono text-xs">{host.hostname}</code> requires administrator authentication.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthKeyInput(getDashboardApiKey() || '');
+                        setShowAuthModal(true);
+                      }}
+                      className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 dark:border-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200 cursor-pointer"
+                    >
+                      <Key className="h-3.5 w-3.5" aria-hidden="true" />
+                      Enter API Key
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <SystemHealthBanner
+                    status={health.status}
+                    label={health.label}
+                    summary={health.summary}
+                    hostname={host.hostname}
+                    os={host.os}
+                    uptime={host.uptime}
+                    openAlertsCount={openAlertsCount}
+                    openSecurityCount={openSecurityCount}
+                    lastUpdated={lastUpdated}
+                    onViewAlerts={() => setActiveView('alerts')}
+                    onViewSecurity={() => setActiveView('security')}
+                  />
+                  <AlertsTable
+                    alerts={alerts}
+                    onUpdateStatus={handleUpdateAlertStatus}
+                    onResetAlerts={handleRefreshAlerts}
+                    title="Operational Alert Log"
+                  />
+                </>
+              )
             )}
           </main>
         </div>
