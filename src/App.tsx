@@ -35,6 +35,7 @@ import {
   mapApiSecurityEventToUi,
   reopenAlert,
   resolveAlert,
+  resolveApiBaseUrl,
   selectPrimaryNetworkInterface,
 } from './services/api';
 import {
@@ -199,9 +200,12 @@ export default function App() {
   // Fetch: system metrics
   // ----------------------------------------------------------------
   const fetchSystemMetrics = useCallback(async () => {
+    const currentBaseUrl = resolveApiBaseUrl();
+    console.info(`[CloudSentinel] Polling system metrics from: ${currentBaseUrl}/api/system`);
     try {
       const data = await getSystemMetrics();
       if (!mountedRef.current) return;
+      console.info('[CloudSentinel] Successfully received system metrics:', data);
       setBackendOnline(true);
       setConnectError(null);
       setIsWakingUp(false);
@@ -210,7 +214,8 @@ export default function App() {
       setLastUpdated(formatShortTime(new Date()));
     } catch (err) {
       if (!mountedRef.current) return;
-      const isRender = API_BASE_URL.includes('onrender.com');
+      const isRender = currentBaseUrl.includes('onrender.com');
+      console.error(`[CloudSentinel] Error fetching system metrics from ${currentBaseUrl}:`, err);
       if (err instanceof ApiError) {
         if (err.status === 401) {
           setIsAuthError(true);
@@ -251,8 +256,9 @@ export default function App() {
       if (mapped.length > 0 && selectedSecurityEventId === null) {
         setSelectedSecurityEventId(mapped[0].id);
       }
-    } catch {
-      // Security events are non-critical — keep existing state silently
+    } catch (err) {
+      console.error('[CloudSentinel] Error fetching security events:', err);
+      // Security events are non-critical — keep existing state
     }
   }, [selectedSecurityEventId]);
 
@@ -264,8 +270,9 @@ export default function App() {
       const data = await getAlerts({ limit: 100 });
       if (!mountedRef.current) return;
       setAlerts(data.alerts.map(mapApiAlertToAlertItem));
-    } catch {
-      // Keep existing alerts silently
+    } catch (err) {
+      console.error('[CloudSentinel] Error fetching alerts:', err);
+      // Keep existing alerts
     }
   }, []);
 
@@ -329,13 +336,23 @@ export default function App() {
   // Manual refresh
   // ----------------------------------------------------------------
   const handleManualRefresh = useCallback(async () => {
+    const currentBaseUrl = resolveApiBaseUrl();
+    console.info(`[CloudSentinel] "Refresh Metrics" clicked. Fetching from ${currentBaseUrl}...`);
     setIsRefreshing(true);
-    await Promise.all([
-      fetchSystemMetrics(),
-      fetchAlerts(),
-      fetchSecurityEvents(),
-    ]);
-    setIsRefreshing(false);
+    try {
+      await Promise.allSettled([
+        fetchSystemMetrics(),
+        fetchAlerts(),
+        fetchSecurityEvents(),
+      ]);
+      console.info('[CloudSentinel] "Refresh Metrics" completed successfully.');
+    } catch (refreshErr) {
+      console.error('[CloudSentinel] Manual refresh encountered an error:', refreshErr);
+    } finally {
+      if (mountedRef.current) {
+        setIsRefreshing(false);
+      }
+    }
   }, [fetchSystemMetrics, fetchAlerts, fetchSecurityEvents]);
 
   // ----------------------------------------------------------------
@@ -686,6 +703,8 @@ export default function App() {
                 type="button"
                 onClick={handleManualRefresh}
                 disabled={isRefreshing}
+                aria-label="Refresh Metrics"
+                title="Refresh Metrics"
                 className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw
@@ -694,7 +713,7 @@ export default function App() {
                   }`}
                   aria-hidden="true"
                 />
-                <span>Refresh</span>
+                <span>Refresh Metrics</span>
               </button>
             </div>
           </header>

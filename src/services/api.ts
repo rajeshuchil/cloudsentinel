@@ -13,11 +13,100 @@ import {
   SecurityEventStatus,
 } from '../types/monitoring';
 
-export const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
-  'http://127.0.0.1:8000';
+export const DEFAULT_API_BASE_URL = 'https://cloudsentinel-backend-a76u.onrender.com';
+export const DEFAULT_API_KEY = '71b3cffb19514d0d9bfcec37355ad173ece837aed7710e4d';
 
-export const DASHBOARD_API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+/**
+ * Dynamically resolves the API base URL with graceful production fallbacks:
+ * 1. Vite environment variable (VITE_API_BASE_URL from .env or build flags)
+ * 2. Window runtime global (__CLOUDSENTINEL_API_URL__)
+ * 3. URL query parameter (?api_url=https://...)
+ * 4. LocalStorage ('CLOUDSENTINEL_API_BASE_URL')
+ * 5. Production Render backend fallback (ensures HTTPS deployments do not attempt blocked localhost calls)
+ */
+export function resolveApiBaseUrl(): string {
+  const envUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
+
+  if (typeof window !== 'undefined') {
+    const win = window as unknown as { __CLOUDSENTINEL_API_URL__?: string };
+    if (win.__CLOUDSENTINEL_API_URL__) {
+      return win.__CLOUDSENTINEL_API_URL__.trim().replace(/\/+$/, '');
+    }
+
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const queryApiUrl = urlParams.get('api_url');
+      if (queryApiUrl) {
+        return queryApiUrl.trim().replace(/\/+$/, '');
+      }
+    } catch {
+      // non-browser or URL parsing failure
+    }
+
+    try {
+      const storedUrl = window.localStorage.getItem('CLOUDSENTINEL_API_BASE_URL');
+      if (storedUrl) {
+        return storedUrl.trim().replace(/\/+$/, '');
+      }
+    } catch {
+      // storage unavailable
+    }
+
+    // If served over HTTPS, avoid insecure http://127.0.0.1 or localhost (blocked by Chrome mixed-content policy)
+    if (
+      window.location.protocol === 'https:' &&
+      (!envUrl || envUrl.includes('127.0.0.1') || envUrl.includes('localhost'))
+    ) {
+      return DEFAULT_RENDER_BACKEND_URL;
+    }
+  }
+
+  if (envUrl && envUrl.length > 0) {
+    return envUrl.replace(/\/+$/, '');
+  }
+
+  return DEFAULT_RENDER_BACKEND_URL;
+}
+
+const DEFAULT_RENDER_BACKEND_URL = DEFAULT_API_BASE_URL;
+
+/**
+ * Dynamically resolves the Dashboard API Key with fallbacks:
+ * 1. Vite environment variable (VITE_API_KEY)
+ * 2. Window runtime global (__CLOUDSENTINEL_API_KEY__)
+ * 3. URL query parameter (?api_key=...)
+ * 4. LocalStorage ('CLOUDSENTINEL_API_KEY')
+ * 5. Production Render key fallback
+ */
+export function resolveDashboardApiKey(): string | undefined {
+  const envKey = (import.meta.env.VITE_API_KEY as string | undefined)?.trim();
+  if (envKey) return envKey;
+
+  if (typeof window !== 'undefined') {
+    const win = window as unknown as { __CLOUDSENTINEL_API_KEY__?: string };
+    if (win.__CLOUDSENTINEL_API_KEY__) return win.__CLOUDSENTINEL_API_KEY__.trim();
+
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const queryKey = urlParams.get('api_key');
+      if (queryKey) return queryKey.trim();
+    } catch {
+      // ignore
+    }
+
+    try {
+      const storedKey = window.localStorage.getItem('CLOUDSENTINEL_API_KEY');
+      if (storedKey) return storedKey.trim();
+    } catch {
+      // ignore
+    }
+  }
+
+  return DEFAULT_API_KEY;
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
+export const DASHBOARD_API_KEY = resolveDashboardApiKey();
 
 export class ApiError extends Error {
   status: number;
@@ -32,15 +121,20 @@ export class ApiError extends Error {
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const baseUrl = resolveApiBaseUrl();
+  const apiKey = resolveDashboardApiKey();
+  const url = `${baseUrl}${endpoint}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...((options.headers as Record<string, string>) || {}),
   };
 
-  if (DASHBOARD_API_KEY) {
-    headers['X-API-Key'] = DASHBOARD_API_KEY;
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey;
   }
+
+  const method = options.method || 'GET';
+  console.info(`[CloudSentinel API] ${method} ${url}`, { headers });
 
   try {
     const response = await fetch(url, {
@@ -59,16 +153,20 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       } catch {
         // Response was not JSON
       }
+      console.error(`[CloudSentinel API Error] ${method} ${url} failed with HTTP ${response.status}:`, errorDetail);
       throw new ApiError(errorDetail, response.status, data);
     }
 
-    return (await response.json()) as T;
+    const result = (await response.json()) as T;
+    console.info(`[CloudSentinel API Response] ${method} ${url} returned 200 OK`);
+    return result;
   } catch (err: unknown) {
     if (err instanceof ApiError) {
       throw err;
     }
     const message = err instanceof Error ? err.message : 'Network request failed';
-    throw new ApiError(`Failed to connect to CloudSentinel backend (${message})`, 0);
+    console.error(`[CloudSentinel API Network Failure] ${method} ${url}:`, err);
+    throw new ApiError(`Failed to connect to CloudSentinel backend at ${baseUrl} (${message})`, 0);
   }
 }
 
