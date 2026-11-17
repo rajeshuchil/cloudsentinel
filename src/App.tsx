@@ -2,6 +2,7 @@ import {
   Activity,
   Bell,
   Check,
+  FlaskConical,
   Info,
   Key,
   Lock,
@@ -72,7 +73,12 @@ const CPU_SERIES_MAX_POINTS: Record<TimeRange, number> = {
   '24h': 96,
 };
 
-export default function App() {
+interface AppProps {
+  /** Optional callback to exit admin mode and return to public Demo Mode */
+  onExitAdmin?: () => void;
+}
+
+export default function App({ onExitAdmin }: AppProps = {}) {
   const [host, setHost] = useState<UbuntuHost>(INITIAL_UBUNTU_HOST);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
@@ -852,6 +858,20 @@ export default function App() {
                 />
                 <span>Refresh Metrics</span>
               </button>
+
+              {/* Back to Demo — only shown when launched from Root.tsx */}
+              {onExitAdmin && (
+                <button
+                  type="button"
+                  onClick={onExitAdmin}
+                  title="Return to Public Demo Mode"
+                  aria-label="Return to Public Demo Mode"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 hover:text-blue-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-300 dark:hover:bg-blue-900/50 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <FlaskConical className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="hidden sm:inline">Demo Mode</span>
+                </button>
+              )}
             </div>
           </header>
 

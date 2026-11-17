@@ -6,6 +6,8 @@ interface CpuLineChartProps {
   nodeName: string;
   timeRange: TimeRange;
   onTimeRangeChange: (range: TimeRange) => void;
+  /** When true, labels the chart as simulated demo data */
+  isDemo?: boolean;
 }
 
 const TIME_RANGES: { value: TimeRange; label: string }[] = [
@@ -22,6 +24,7 @@ export function CpuLineChart({
   nodeName,
   timeRange,
   onTimeRangeChange,
+  isDemo = false,
 }: CpuLineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(820);
@@ -138,8 +141,8 @@ export function CpuLineChart({
             <span className="text-xs text-slate-400 dark:text-slate-600" aria-hidden="true">
               ·
             </span>
-            <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-              PSUTIL LIVE
+            <span className={`font-mono text-[11px] font-medium ${isDemo ? 'text-blue-600 dark:text-blue-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+              {isDemo ? 'SIMULATED' : 'PSUTIL LIVE'}
             </span>
           </div>
 
